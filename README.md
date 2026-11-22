@@ -40,8 +40,15 @@ Ele baixa a versão mais recente para a pasta temporária e abre o programa (con
 | Tarefas agendadas | Tarefas de terceiros e com padrões maliciosos |
 | Eventos | Telas azuis, desligamentos, erros de disco/hardware, logons com falha, logs apagados |
 
+## Ações após a auditoria
+- **Solucionar problemas** — abre a lista de reparos, já marcando a correção de cada problema encontrado (firewall desligado, proteção em tempo real, SMBv1, conta Convidado, UAC, WDigest, AutoRun, bloqueio de conta, políticas que desligam Defender/Windows Update...) e os reparos gerais: ponto de restauração, **DISM /RestoreHealth**, **SFC /scannow**, **CHKDSK /scan** (e CHKDSK completo no reinício), atualização do antivírus, redefinição e instalação do Windows Update, atualização de programas (winget), limpeza de temporários e redefinição de rede.
+- **Otimizar Windows (Standard)** — aplica os mesmos 12 ajustes do modo *Standard* da aba *Tweaks* do [WinUtil](https://github.com/ChrisTitusTech/winutil) do Chris Titus Tech (licença MIT): ponto de restauração, histórico de atividades, ConsumerFeatures, descoberta automática de pastas, WPBT, localização, serviços em manual, telemetria, otimização de entrega, limpeza de disco, temporários e "Finalizar tarefa" na barra.
+- **Ativação do Windows** — somente ativação legítima: com a chave OEM gravada na placa-mãe ou com uma chave de produto informada.
+
+Todas as alterações guardam o valor anterior. Na pasta do relatório é gerado o **`desfazer_alteracoes.ps1`**, que volta as configurações ao estado original.
+
 ## Relatório auditável
-Cada auditoria gera uma pasta com o PDF, o `relatorio.html`, o `evidencias.json` (todos os dados brutos), os prints e, se houver, o `restaurar_servicos.ps1`. O PDF traz o **código SHA-256** do arquivo de evidências e de cada print: se alguém alterar esses arquivos, o código muda.
+Cada auditoria gera uma pasta com o PDF, o `relatorio.html`, o `evidencias.json` (todos os dados brutos), os prints e, se houver, o `desfazer_alteracoes.ps1`. O PDF traz o **código SHA-256** do arquivo de evidências e de cada print: se alguém alterar esses arquivos, o código muda.
 
 ## Publicar uma nova versão (para quem mantém o projeto)
 1. Altere o código em `src/AuditorTI.ps1` e atualize `$Global:VersaoApp`.

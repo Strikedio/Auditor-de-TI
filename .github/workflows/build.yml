@@ -27,13 +27,33 @@ jobs:
           if ($falhou) { exit 1 } else { Write-Host 'Sintaxe OK' }
 
       - name: Executar auditoria completa sem interface (teste real)
-        timeout-minutes: 25
+        timeout-minutes: 40
         shell: powershell
         run: |
           $saida = Join-Path $env:GITHUB_WORKSPACE 'teste-saida'
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\AuditorTI.ps1 -SemInterface -Cliente 'Teste GitHub' -Tecnico 'Verificacao automatica' -Timbrado .\exemplos\timbrado-exemplo.png -Saida $saida
+          $otim = 'restauracao,atividade,consumidor,descoberta,wpbt,localizacao,servicos,telemetria,entrega,temp,fimtarefa'
+          $corr = 'firewall,smb1,autorun,dns,temp,chkdsk,assinaturas'
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\AuditorTI.ps1 -SemInterface -Cliente 'Teste GitHub' -Tecnico 'Verificacao automatica' -Timbrado .\exemplos\timbrado-exemplo.png -Saida $saida -Otimizar $otim -Corrigir $corr
           Write-Host "Codigo de saida: $LASTEXITCODE"
           if (-not (Get-ChildItem $saida -Recurse -Filter *.pdf)) { Write-Host 'PDF nao foi gerado'; exit 1 }
+          $desf = Get-ChildItem $saida -Recurse -Filter desfazer_alteracoes.ps1 | Select-Object -First 1
+          if (-not $desf) { Write-Host 'Script desfazer_alteracoes.ps1 nao foi gerado'; exit 1 }
+          $v = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings' -ErrorAction SilentlyContinue).TaskbarEndTask
+          Write-Host "TaskbarEndTask apos otimizar: $v"
+          if ($v -ne 1) { Write-Host 'Otimizacao nao aplicou TaskbarEndTask'; exit 1 }
+
+      - name: Testar o script de desfazer
+        timeout-minutes: 5
+        shell: powershell
+        run: |
+          $desf = Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE 'teste-saida') -Recurse -Filter desfazer_alteracoes.ps1 | Select-Object -First 1
+          $erros = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($desf.FullName, [ref]$null, [ref]$erros)
+          if ($erros) { $erros | ForEach-Object { Write-Host "ERRO linha $($_.Extent.StartLineNumber): $($_.Message)" }; exit 1 }
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File $desf.FullName
+          $v = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings' -ErrorAction SilentlyContinue).TaskbarEndTask
+          Write-Host "TaskbarEndTask apos desfazer: '$v'"
+          if ($null -ne $v) { Write-Host 'Desfazer nao restaurou o valor'; exit 1 }
+          Write-Host 'Desfazer OK'
 
       - name: Testar a janela do programa
         timeout-minutes: 5

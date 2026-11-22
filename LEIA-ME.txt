@@ -13,7 +13,12 @@ COMO USAR
   5. Clique em INICIAR AUDITORIA e acompanhe cada teste.
   6. No teste de Áudio ele toca dois bipes e pergunta se você ouviu.
   7. No teste de Serviços ele só desativa o que você marcar e confirmar.
-  8. No final, gere o relatório em PDF.
+  8. No final, use os botões do topo, se precisar:
+       Solucionar problemas -> corrige o que foi encontrado + DISM, SFC,
+                               CHKDSK, Windows Update, limpeza etc.
+       Otimizar Windows     -> ajustes do modo Standard do WinUtil
+       Ativação do Windows  -> ativa com a chave da placa ou chave comprada
+  9. Gere o relatório em PDF.
      Para mudar as margens, gere de novo com "Gerar relatório PDF",
      sem refazer os testes.
 
@@ -25,7 +30,7 @@ ONDE FICAM OS ARQUIVOS
      %APPDATA%\AuditorTI  e  Documentos\AuditoriasTI
 
   Cada relatório tem: PDF, relatorio.html, evidencias.json (dados brutos),
-  prints\ e restaurar_servicos.ps1 (se algum serviço foi desativado).
+  prints\ e desfazer_alteracoes.ps1 (volta as configurações alteradas).
 
 SEM PENDRIVE? Abra o PowerShell e cole:
   irm https://raw.githubusercontent.com/Strikedio/Auditor-de-TI/main/run.ps1 | iex

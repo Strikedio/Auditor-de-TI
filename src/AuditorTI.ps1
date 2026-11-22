@@ -14,10 +14,12 @@ param(
     [string]$Cliente = 'Teste automatizado',
     [string]$Tecnico = '',
     [string]$Timbrado = '',
-    [string]$Saida = ''
+    [string]$Saida = '',
+    [string]$Otimizar = '',     # (sem interface) ids das otimizações ou 'todos'
+    [string]$Corrigir = ''      # (sem interface) ids dos reparos, separados por vírgula
 )
 
-$Global:VersaoApp = '1.1.2'
+$Global:VersaoApp = '1.2.0'
 $ErrorActionPreference = 'Continue'
 try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop } catch {}
 
@@ -163,8 +165,9 @@ function Invoke-Cmd([string]$Exe, [string]$Argumentos, [int]$TimeoutMs = 120000,
         [void]$tOut.Wait(10000); [void]$tErr.Wait(2000)
         $o = if ($tOut.IsCompleted) { [string]$tOut.Result } else { '' }
         $e = if ($tErr.IsCompleted) { [string]$tErr.Result } else { '' }
-        return ($o + $e)
-    } catch { return '' }
+        $global:UltimoCodigo = if ($p.HasExited) { $p.ExitCode } else { -1 }
+        return (($o + $e) -replace "`0", '')
+    } catch { $global:UltimoCodigo = -1; return '' }
 }
 
 # Extrai o caminho do executável de uma linha de comando
@@ -200,6 +203,76 @@ function Test-Suspeito([string]$t) {
     if (-not $t) { return $false }
     $p = '\\AppData\\Local\\Temp\\|\\Windows\\Temp\\|\\Users\\Public\\|\\Downloads\\|\\\$Recycle|\s-enc(odedcommand)?\s|\s-e\s+[A-Za-z0-9+/=]{20,}|frombase64string|downloadstring|downloadfile|invoke-webrequest|\biwr\s|\biex[\s(]|invoke-expression|mshta|regsvr32.+/i:|rundll32.+(javascript|http)|certutil.+(-urlcache|-decode)|bitsadmin.+/transfer|\s-w(indowstyle)?\s+hidden|wscript.+\.(vbs|js)\b|cscript.+\.(vbs|js)\b'
     return [regex]::IsMatch($t, $p, 'IgnoreCase')
+}
+
+# ---------- Ações que alteram o sistema (sempre registram o estado anterior) ----------
+function Add-Acao($R, [string]$Acao, [string]$Item, [string]$Anterior, [string]$Resultado, [string]$Desfazer = '') {
+    if (-not $R.Extra.Acoes) { $R.Extra.Acoes = New-Object System.Collections.ArrayList }
+    [void]$R.Extra.Acoes.Add([pscustomobject]@{ Data = Get-Date; 'Ação' = $Acao; Item = $Item; 'Estado anterior' = $Anterior; Resultado = $Resultado; Desfazer = $Desfazer })
+}
+
+function ConvertTo-LiteralPS($v) {
+    if ($null -eq $v) { return '$null' }
+    if ($v -is [string]) { return "'" + $v.Replace("'", "''") + "'" }
+    if ($v -is [string[]]) { return '@(' + (($v | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ',') + ')' }
+    if ($v -is [byte[]]) { return '([byte[]](' + ($v -join ',') + '))' }
+    if ($v -is [ValueType]) { return [string]$v }
+    return "'" + ([string]$v).Replace("'", "''") + "'"
+}
+
+# Altera um valor do registro guardando como desfazer
+function Set-RegTweak($R, [string]$Path, [string]$Name, $Value, [string]$Type = 'DWord') {
+    $existia = $false; $ant = $null; $tipoAnt = $Type
+    try {
+        $k = Get-Item -LiteralPath $Path -ErrorAction Stop
+        if ($k.GetValueNames() -contains $Name) { $existia = $true; $ant = $k.GetValue($Name, $null, 'DoNotExpandEnvironmentNames'); $tipoAnt = [string]$k.GetValueKind($Name) }
+    } catch {}
+    if ($existia) { $undo = "New-ItemProperty -LiteralPath '$Path' -Name '$Name' -Value $(ConvertTo-LiteralPS $ant) -PropertyType $tipoAnt -Force | Out-Null" }
+    else { $undo = "Remove-ItemProperty -LiteralPath '$Path' -Name '$Name' -ErrorAction SilentlyContinue" }
+    try {
+        if ([string]$Value -eq '<RemoveEntry>') { Remove-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction SilentlyContinue }
+        else {
+            if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
+            New-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -PropertyType $Type -Force -ErrorAction Stop | Out-Null
+        }
+        $res = 'Sucesso'
+    } catch { $res = "Falha: $($_.Exception.Message)" }
+    Add-Acao $R 'Registro' "$Path\$Name = $Value" $(if ($existia) { [string]$ant } else { '(não existia)' }) $res $undo
+}
+
+# Altera o tipo de inicialização de um serviço guardando como desfazer
+function Set-SvcTweak($R, [string]$Name, [string]$Tipo) {
+    $s = Get-CimInstance Win32_Service -Filter "Name='$Name'"
+    if (-not $s) { Add-Acao $R 'Serviço' "$Name -> $Tipo" '-' 'Ignorado (serviço não existe)'; return }
+    $sc = switch ($s.StartMode) { 'Auto' { if ($s.DelayedAutoStart) { 'delayed-auto' } else { 'auto' } } 'Manual' { 'demand' } 'Disabled' { 'disabled' } default { 'demand' } }
+    try { Set-Service -Name $s.Name -StartupType $Tipo -ErrorAction Stop; $res = 'Sucesso' } catch { $res = "Falha: $($_.Exception.Message)" }
+    Add-Acao $R 'Serviço' "$($s.Name) ($($s.DisplayName)) -> $Tipo" ([string]$s.StartMode) $res "sc.exe config `"$($s.Name)`" start= $sc | Out-Null"
+}
+
+# Executa uma etapa, registra o resultado e o tempo
+function Invoke-Etapa($R, [string]$Nome, [scriptblock]$Bloco) {
+    Log ">> $Nome..."
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $st = 'OK'
+    try { $msg = & $Bloco; if (-not $msg) { $msg = 'Concluído' } }
+    catch { $msg = "Falha: $($_.Exception.Message)"; $st = 'Atenção' }
+    $msg = [string](@($msg) | Select-Object -Last 1)
+    if ($msg -like 'Falha*' -or $msg -like 'ATENÇÃO*') { $st = 'Atenção' }
+    Add-Item $R $Nome ("{0} ({1:N0} s)" -f $msg, $sw.Elapsed.TotalSeconds) $st
+    Log "   $Nome -> $msg"
+}
+
+# Últimas linhas úteis da saída de um comando
+function Get-Resumo([string]$txt, [int]$n = 2) {
+    ((($txt -split "`r?`n") | ForEach-Object { ($_ -split "`r")[-1].Trim() } | Where-Object { $_ -and $_ -notmatch '^[\s\.\d%=\[\]-]+$' }) | Select-Object -Last $n) -join ' | '
+}
+
+function New-PontoRestauracao($R, [string]$Descricao) {
+    Set-RegTweak $R 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore' 'SystemRestorePointCreationFrequency' 0 'DWord'
+    if (-not (Get-ComputerRestorePoint -ErrorAction SilentlyContinue)) { Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction Stop }
+    Checkpoint-Computer -Description $Descricao -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+    Add-Acao $R 'Ponto de restauração' $Descricao '-' 'Sucesso'
+    'Ponto de restauração criado'
 }
 '@
 
@@ -1591,10 +1664,19 @@ ul { margin: 1mm 0 2mm 5mm; padding-left: 3mm; } li { margin-bottom: 1mm; }
     if ($dicas.Count) { & $Wr "<h3>Sugestões adicionais</h3><ul>"; foreach ($d in $dicas) { & $Wr "<li>$(Esc $d.Achado) — $(Esc $d.Recomendacao)</li>" }; & $Wr "</ul>" }
 
     # ---------- Ações executadas ----------
-    if ($Global:Acoes.Count) {
-        & $Wr "<h2>Ações executadas durante a auditoria</h2>"
-        & $Wr "<p>As alterações abaixo foram autorizadas pelo técnico durante a execução. O estado original foi registrado e o script <b>restaurar_servicos.ps1</b> (na pasta do relatório) desfaz as alterações.</p>"
-        & $Wr (ConvertTo-TabelaHtml ($Global:Acoes | Select-Object @{n = 'Data/hora'; e = { $_.Data.ToString('dd/MM/yyyy HH:mm:ss') } }, 'Ação', 'Serviço', 'Nome', 'Estado anterior', 'Resultado') 100)
+    if ($Global:Lotes.Count -or $Global:Acoes.Count) {
+        & $Wr "<h2>Manutenção e alterações realizadas</h2>"
+        & $Wr "<p>As ações abaixo foram autorizadas pelo técnico. Os achados e as notas deste relatório refletem a situação <b>encontrada</b> na auditoria; para comprovar o resultado das correções, execute uma nova auditoria após reiniciar o computador.</p>"
+        foreach ($lt in $Global:Lotes) {
+            & $Wr "<h3>$(Esc $lt.Titulo) <span class='obs'>($($lt.Inicio.ToString('dd/MM/yyyy HH:mm')) a $($lt.Fim.ToString('HH:mm')))</span></h3>"
+            & $Wr "<table class='dados'><thead><tr><th style='width:40%'>Etapa</th><th>Resultado</th><th style='width:16mm'>Situação</th></tr></thead><tbody>"
+            foreach ($i in $lt.Itens) { & $Wr "<tr><td>$(Esc $i.Item)</td><td>$(Esc $i.Valor)</td><td><span class='badge $(Get-Classe $i.Status)'>$(Esc $i.Status)</span></td></tr>" }
+            & $Wr "</tbody></table>"
+        }
+        if ($Global:Acoes.Count) {
+            & $Wr "<h3>Registro detalhado das alterações</h3><p class='obs'>O valor anterior de cada configuração foi guardado. O script <b>desfazer_alteracoes.ps1</b> (na pasta do relatório) restaura as configurações alteradas.</p>"
+            & $Wr (ConvertTo-TabelaHtml ($Global:Acoes | Select-Object @{n = 'Data/hora'; e = { $_.Data.ToString('dd/MM HH:mm:ss') } }, 'Ação', 'Item', 'Estado anterior', 'Resultado', @{n = 'Reversível'; e = { SimNao ([bool]$_.Desfazer) } }) 300)
+        }
     }
 
     # ---------- Detalhamento ----------
@@ -1686,7 +1768,8 @@ function New-Relatorio($Info) {
             $r = $Global:Resultados[$k]
             [ordered]@{ Id = $k; Nome = $r.Nome; Situacao = $r.Situacao; DuracaoSeg = [math]::Round($r.Duracao, 1); Itens = @($r.Itens); Achados = @($r.Achados); Tabelas = @($r.Tabelas | ForEach-Object { [ordered]@{ Titulo = $_.Titulo; Linhas = @($_.Linhas) } }); Metricas = $r.Metricas }
         })
-        AcoesExecutadas = @($Global:Acoes | Select-Object @{n = 'Data'; e = { $_.Data.ToString('o') } }, 'Ação', 'Serviço', 'Nome', 'Estado anterior', 'Resultado')
+        Manutencao = @($Global:Lotes | ForEach-Object { [ordered]@{ Titulo = $_.Titulo; Inicio = $_.Inicio.ToString('o'); Fim = $_.Fim.ToString('o'); Etapas = @($_.Itens) } })
+        AcoesExecutadas = @($Global:Acoes | Select-Object @{n = 'Data'; e = { $_.Data.ToString('o') } }, 'Ação', 'Item', 'Estado anterior', 'Resultado', 'Desfazer')
         Capturas = @($hp)
         Log = @($Global:LogGeral)
     }
@@ -1694,19 +1777,22 @@ function New-Relatorio($Info) {
     [IO.File]::WriteAllText($jsonArq, ($evid | ConvertTo-Json -Depth 8), $utf8)
     $hash = (Get-FileHash $jsonArq -Algorithm SHA256).Hash
 
-    # script de restauração dos serviços
-    if ($Global:Acoes.Count) {
+    # script para desfazer as alterações (ordem inversa)
+    $desf = @($Global:Acoes | Where-Object { $_.Desfazer -and $_.Resultado -like 'Sucesso*' })
+    if ($desf.Count) {
         $sr = New-Object System.Text.StringBuilder
-        [void]$sr.AppendLine("# Restaura os serviços alterados pelo AuditorTI - $Global:IdAud")
+        [void]$sr.AppendLine("# Desfaz as alterações feitas pelo AuditorTI - $Global:IdAud")
         [void]$sr.AppendLine("# Execute como Administrador: clique com o botão direito > Executar com o PowerShell")
-        foreach ($a in $Global:Acoes) {
-            if ($a.Resultado -notlike 'Sucesso*') { continue }
-            $modo = switch ($a.InicioOriginal) { 'Auto' { if ($a.Atrasado) { 'delayed-auto' } else { 'auto' } } 'Manual' { 'demand' } 'Disabled' { 'disabled' } default { 'demand' } }
-            [void]$sr.AppendLine("sc.exe config `"$($a.'Serviço')`" start= $modo")
-            if ($a.EstavaRodando) { [void]$sr.AppendLine("Start-Service -Name '$($a.'Serviço')' -ErrorAction SilentlyContinue") }
+        [void]$sr.AppendLine('$p = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())')
+        [void]$sr.AppendLine('if (-not $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { Start-Process powershell.exe "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs; exit }')
+        [void]$sr.AppendLine('$ErrorActionPreference = ''Continue''')
+        for ($j = $desf.Count - 1; $j -ge 0; $j--) {
+            [void]$sr.AppendLine("# $($desf[$j].'Ação'): $($desf[$j].Item)")
+            [void]$sr.AppendLine($desf[$j].Desfazer)
         }
-        [void]$sr.AppendLine("Write-Host 'Serviços restaurados.'; Start-Sleep 3")
-        [IO.File]::WriteAllText((Join-Path $dir 'restaurar_servicos.ps1'), $sr.ToString(), (New-Object System.Text.UTF8Encoding $true))
+        [void]$sr.AppendLine("Write-Host 'Alterações desfeitas. Reinicie o computador.' -ForegroundColor Green")
+        [void]$sr.AppendLine("if (-not `$env:CI) { Read-Host 'Pressione ENTER para fechar' }")
+        [IO.File]::WriteAllText((Join-Path $dir 'desfazer_alteracoes.ps1'), $sr.ToString(), (New-Object System.Text.UTF8Encoding $true))
     }
 
     $html = New-RelatorioHtml $Info $notas $hash $hp
@@ -1769,6 +1855,7 @@ function Invoke-Teste($t, $item) {
     while (-not $h.IsCompleted) {
         Update-Log
         if ($item) { $item.SubItems[2].Text = ('{0:N0} s' -f $sw.Elapsed.TotalSeconds) }
+        elseif ($Global:StatusBase -and $lblStatus) { $lblStatus.Text = ('{0}  ({1:mm\:ss})' -f $Global:StatusBase, $sw.Elapsed) }
         [System.Windows.Forms.Application]::DoEvents()
         Start-Sleep -Milliseconds 60
         if ($Global:Cancelar) { break }
@@ -1849,7 +1936,7 @@ function Invoke-RevisaoServicos($res) {
     $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
     $dlg.Font = New-Object Drawing.Font('Segoe UI', 9)
     $lb = New-Object Windows.Forms.Label
-    $lb.Text = "Os serviços abaixo NÃO são essenciais para o funcionamento do Windows. Marque os que deseja DESATIVAR.`r`n'Recomendado' = pode ser desativado com segurança.  'Avaliar' = desative somente se o cliente não usa o recurso.`r`nNada será alterado sem a sua confirmação. O estado original será salvo e um script de restauração será gerado."
+    $lb.Text = "Os serviços abaixo NÃO são essenciais para o funcionamento do Windows. Marque os que deseja DESATIVAR.`r`n'Recomendado' = pode ser desativado com segurança.  'Avaliar' = desative somente se o cliente não usa o recurso.`r`nNada será alterado sem a sua confirmação. O estado original será salvo e um script para desfazer será gerado."
     $lb.Location = New-Object Drawing.Point(12, 10); $lb.Size = New-Object Drawing.Size(940, 52)
     $lvS = New-Object Windows.Forms.ListView
     $lvS.View = 'Details'; $lvS.CheckBoxes = $true; $lvS.FullRowSelect = $true; $lvS.GridLines = $true
@@ -1868,7 +1955,7 @@ function Invoke-RevisaoServicos($res) {
     if ($dlg.ShowDialog($form) -ne 'OK') { Write-LogUI 'Revisão de serviços: nenhuma alteração realizada.'; Add-Item $res 'Desativação de serviços' 'Nenhuma alteração (decisão do técnico)' 'Info'; return }
     $sel = @($lvS.CheckedItems | ForEach-Object { $_.Text })
     if (-not $sel.Count) { Add-Item $res 'Desativação de serviços' 'Nenhum serviço selecionado' 'Info'; return }
-    $msg = "Confirma a DESATIVAÇÃO de {0} serviço(s)?`r`n`r`n{1}`r`n`r`nO estado original será registrado no relatório e em restaurar_servicos.ps1." -f $sel.Count, ($sel -join ', ')
+    $msg = "Confirma a DESATIVAÇÃO de {0} serviço(s)?`r`n`r`n{1}`r`n`r`nO estado original será registrado no relatório e em desfazer_alteracoes.ps1." -f $sel.Count, ($sel -join ', ')
     if ([System.Windows.Forms.MessageBox]::Show($form, $msg, 'Confirmar alteração', 'YesNo', 'Warning') -ne 'Yes') { Add-Item $res 'Desativação de serviços' 'Cancelada pelo técnico' 'Info'; return }
     $ok = 0
     foreach ($n in $sel) {
@@ -1881,10 +1968,12 @@ function Invoke-RevisaoServicos($res) {
         } catch { $resultado = "Sucesso (não parou agora: $($_.Exception.Message))" }
         try { Set-Service -Name $n -StartupType Disabled -ErrorAction Stop; $ok++ }
         catch { $resultado = "Falha: $($_.Exception.Message)" }
+        $modo = switch ($o.StartMode) { 'Auto' { if ($o.DelayedAutoStart) { 'delayed-auto' } else { 'auto' } } 'Manual' { 'demand' } 'Disabled' { 'disabled' } default { 'demand' } }
+        $undo = "sc.exe config `"$n`" start= $modo | Out-Null" + $(if ($o.State -eq 'Running') { "; Start-Service -Name '$n' -ErrorAction SilentlyContinue" } else { '' })
         [void]$Global:Acoes.Add([pscustomobject]@{
-            'Data' = Get-Date; 'Ação' = 'Serviço desativado'; 'Serviço' = $n; 'Nome' = $o.DisplayName
+            'Data' = Get-Date; 'Ação' = 'Serviço desativado'; 'Item' = "$n ($($o.DisplayName))"
             'Estado anterior' = ("{0} / {1}{2}" -f $o.State, $o.StartMode, $(if ($o.DelayedAutoStart) { ' (atrasado)' } else { '' }))
-            'Resultado' = $resultado; 'InicioOriginal' = [string]$o.StartMode; 'Atrasado' = [bool]$o.DelayedAutoStart; 'EstavaRodando' = ($o.State -eq 'Running')
+            'Resultado' = $resultado; 'Desfazer' = $(if ($resultado -like 'Sucesso*') { $undo } else { '' })
         })
         Write-LogUI "  -> $resultado"
     }
@@ -1919,6 +2008,545 @@ function Set-Timbrado([string]$origem) {
     Save-Config
 }
 
+
+# =====================================================================
+#  AÇÕES: OTIMIZAÇÃO (WinUtil Standard), SOLUCIONAR PROBLEMAS E ATIVAÇÃO
+# =====================================================================
+
+# ---------------------------------------------------------------------
+# Otimização - mesmos ajustes do preset "Standard" da aba Tweaks do
+# Chris Titus Tech WinUtil (https://github.com/ChrisTitusTech/winutil,
+# licença MIT, arquivo config/tweaks.json). Cada alteração guarda o valor
+# anterior e entra no script desfazer_alteracoes.ps1.
+# ---------------------------------------------------------------------
+$Global:TweaksPadrao = @(
+    @{ Id = 'restauracao'; Nome = 'Ponto de restauração - criar'; Desc = 'Cria um ponto de restauração antes das alterações.' }
+    @{ Id = 'atividade'; Nome = 'Histórico de atividades - desativar'; Desc = 'Políticas EnableActivityFeed / PublishUserActivities / UploadUserActivities.' }
+    @{ Id = 'consumidor'; Nome = 'ConsumerFeatures - desativar'; Desc = 'Impede a instalação automática de apps sugeridos (Candy Crush etc.).' }
+    @{ Id = 'descoberta'; Nome = 'Descoberta automática de pastas do Explorer - desativar'; Desc = 'Limpa o cache de visualização de pastas e usa visualização genérica (não reversível; só aparência).' }
+    @{ Id = 'wpbt'; Nome = 'Windows Platform Binary Table (WPBT) - desativar'; Desc = 'Impede que o firmware instale programas no Windows.' }
+    @{ Id = 'localizacao'; Nome = 'Rastreamento de localização - desativar'; Desc = 'Desativa o serviço lfsvc, o acesso à localização e a atualização automática de mapas.' }
+    @{ Id = 'servicos'; Nome = 'Serviços - definir como manual'; Desc = 'CscService e DiagTrack desativados; MapsBroker e StorSvc manuais; SharedAccess (ICS/hotspot) desativado.' }
+    @{ Id = 'telemetria'; Nome = 'Telemetria - desativar'; Desc = 'Telemetria, publicidade, coleta de digitação/escrita, relatório de erros e envio de amostras do Defender.' }
+    @{ Id = 'entrega'; Nome = 'Otimização de Entrega - desativar'; Desc = 'Impede o compartilhamento de atualizações com outros PCs (DODownloadMode=0).' }
+    @{ Id = 'limpeza'; Nome = 'Limpeza de disco - executar'; Desc = 'cleanmgr /VERYLOWDISK e DISM /StartComponentCleanup /ResetBase (demorado; remove a opção de desinstalar atualizações antigas).' }
+    @{ Id = 'temp'; Nome = 'Arquivos temporários - remover'; Desc = 'Apaga o conteúdo de %TEMP% e C:\Windows\Temp.' }
+    @{ Id = 'fimtarefa'; Nome = 'Finalizar tarefa com botão direito - ativar'; Desc = 'Adiciona "Finalizar tarefa" ao clicar com o botão direito na barra de tarefas.' }
+)
+
+$Global:CodigoOtimizar = {
+    $R = New-R
+    $sel = @($Cfg.Selecao)
+    Log 'Otimização do Windows - preset Standard (WinUtil)'
+    if ($sel -contains 'restauracao') { Invoke-Etapa $R 'Ponto de restauração - criar' { New-PontoRestauracao $R 'AuditorTI - antes da otimizacao' } }
+    if ($sel -contains 'atividade') {
+        Invoke-Etapa $R 'Histórico de atividades - desativar' {
+            $p = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System'
+            Set-RegTweak $R $p 'EnableActivityFeed' 1
+            Set-RegTweak $R $p 'PublishUserActivities' 0
+            Set-RegTweak $R $p 'UploadUserActivities' 0
+        }
+    }
+    if ($sel -contains 'consumidor') { Invoke-Etapa $R 'ConsumerFeatures - desativar' { Set-RegTweak $R 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent' 'DisableWindowsConsumerFeatures' 1 } }
+    if ($sel -contains 'descoberta') {
+        Invoke-Etapa $R 'Descoberta automática de pastas - desativar' {
+            $base = 'HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell'
+            foreach ($k in @("$base\Bags", "$base\BagMRU")) { if (Test-Path $k) { Remove-Item -Path $k -Recurse -Force -ErrorAction Stop } }
+            $all = "$base\Bags\AllFolders\Shell"
+            if (-not (Test-Path $all)) { New-Item -Path $all -Force | Out-Null }
+            New-ItemProperty -Path $all -Name 'FolderType' -Value 'NotSpecified' -PropertyType String -Force | Out-Null
+            Add-Acao $R 'Registro' "$all\FolderType = NotSpecified (cache de pastas limpo)" '-' 'Sucesso' "Remove-ItemProperty -LiteralPath '$all' -Name 'FolderType' -ErrorAction SilentlyContinue"
+            'Concluído (vale após sair e entrar novamente na conta)'
+        }
+    }
+    if ($sel -contains 'wpbt') { Invoke-Etapa $R 'WPBT - desativar' { Set-RegTweak $R 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' 'DisableWpbtExecution' 1 } }
+    if ($sel -contains 'localizacao') {
+        Invoke-Etapa $R 'Rastreamento de localização - desativar' {
+            Set-SvcTweak $R 'lfsvc' 'Disabled'
+            Set-RegTweak $R 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location' 'Value' 'Deny' 'String'
+            Set-RegTweak $R 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Sensor\Overrides\{BFA794E4-F964-4FDB-90F6-51056BFE4B44}' 'SensorPermissionState' 0
+            Set-RegTweak $R 'HKLM:\SYSTEM\Maps' 'AutoUpdateEnabled' 0
+        }
+    }
+    if ($sel -contains 'servicos') {
+        Invoke-Etapa $R 'Serviços - definir como manual' {
+            Set-SvcTweak $R 'CscService' 'Disabled'
+            Set-SvcTweak $R 'DiagTrack' 'Disabled'
+            Set-SvcTweak $R 'MapsBroker' 'Manual'
+            Set-SvcTweak $R 'StorSvc' 'Manual'
+            Set-SvcTweak $R 'SharedAccess' 'Disabled'
+        }
+    }
+    if ($sel -contains 'telemetria') {
+        Invoke-Etapa $R 'Telemetria - desativar' {
+            Set-SvcTweak $R 'DiagTrack' 'Disabled'
+            Set-SvcTweak $R 'WerSvc' 'Disabled'
+            Set-RegTweak $R 'HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo' 'Enabled' 0
+            Set-RegTweak $R 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy' 'TailoredExperiencesWithDiagnosticDataEnabled' 0
+            Set-RegTweak $R 'HKCU:\Software\Microsoft\Speech_OneCore\Settings\OnlineSpeechPrivacy' 'HasAccepted' 0
+            Set-RegTweak $R 'HKCU:\Software\Microsoft\Input\TIPC' 'Enabled' 0
+            Set-RegTweak $R 'HKCU:\Software\Microsoft\InputPersonalization' 'RestrictImplicitInkCollection' 1
+            Set-RegTweak $R 'HKCU:\Software\Microsoft\InputPersonalization' 'RestrictImplicitTextCollection' 1
+            Set-RegTweak $R 'HKCU:\Software\Microsoft\InputPersonalization\TrainedDataStore' 'HarvestContacts' 0
+            Set-RegTweak $R 'HKCU:\Software\Microsoft\Personalization\Settings' 'AcceptedPrivacyPolicy' 0
+            Set-RegTweak $R 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\DataCollection' 'AllowTelemetry' 0
+            Set-RegTweak $R 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'Start_TrackProgs' 0
+            Set-RegTweak $R 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'PublishUserActivities' 0
+            Set-RegTweak $R 'HKCU:\Software\Microsoft\Siuf\Rules' 'NumberOfSIUFInPeriod' 0
+            Set-RegTweak $R 'HKCU:\Software\Microsoft\Siuf\Rules' 'PeriodInNanoSeconds' '<RemoveEntry>' 'QWord'
+            try {
+                $antSS = (Get-MpPreference -ErrorAction Stop).SubmitSamplesConsent
+                Set-MpPreference -SubmitSamplesConsent 2 -ErrorAction Stop
+                Add-Acao $R 'Defender' 'Envio automático de amostras = 2 (nunca enviar)' ([string]$antSS) 'Sucesso' "Set-MpPreference -SubmitSamplesConsent $([int]$antSS)"
+            } catch { Add-Acao $R 'Defender' 'Envio automático de amostras = 2' '-' "Ignorado: $($_.Exception.Message)" }
+            $antPs = [Environment]::GetEnvironmentVariable('POWERSHELL_TELEMETRY_OPTOUT', 'Machine')
+            [Environment]::SetEnvironmentVariable('POWERSHELL_TELEMETRY_OPTOUT', '1', 'Machine')
+            Add-Acao $R 'Variável de ambiente' 'POWERSHELL_TELEMETRY_OPTOUT = 1' $(if ($antPs) { $antPs } else { '(não existia)' }) 'Sucesso' $(if ($antPs) { "[Environment]::SetEnvironmentVariable('POWERSHELL_TELEMETRY_OPTOUT', '$antPs', 'Machine')" } else { "[Environment]::SetEnvironmentVariable('POWERSHELL_TELEMETRY_OPTOUT', `$null, 'Machine')" })
+        }
+    }
+    if ($sel -contains 'entrega') { Invoke-Etapa $R 'Otimização de Entrega - desativar' { Set-RegTweak $R 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DeliveryOptimization' 'DODownloadMode' 0 } }
+    if ($sel -contains 'limpeza') {
+        Invoke-Etapa $R 'Limpeza de disco (cleanmgr)' {
+            $livre0 = (Get-PSDrive ($env:SystemDrive.TrimEnd(':'))).Free
+            [void](Invoke-Cmd "$env:windir\System32\cleanmgr.exe" "/d $($env:SystemDrive.TrimEnd(':')) /VERYLOWDISK" 900000)
+            $ganho = ((Get-PSDrive ($env:SystemDrive.TrimEnd(':'))).Free - $livre0) / 1GB
+            Add-Acao $R 'Limpeza' 'cleanmgr /VERYLOWDISK' '-' 'Sucesso'
+            'Concluído ({0:N2} GB liberados)' -f [math]::Max(0, $ganho)
+        }
+        Invoke-Etapa $R 'Limpeza de componentes do Windows (DISM /ResetBase)' {
+            $o = Invoke-Cmd "$env:windir\System32\dism.exe" '/Online /Cleanup-Image /StartComponentCleanup /ResetBase' 3600000
+            $cod = $global:UltimoCodigo
+            Add-Acao $R 'Limpeza' 'DISM /StartComponentCleanup /ResetBase (não reversível)' '-' $(if ($cod -eq 0) { 'Sucesso' } else { "Código $cod" })
+            if ($cod -eq 0) { 'Concluído' } else { "ATENÇÃO: código $cod - $(Get-Resumo $o 1)" }
+        }
+    }
+    if ($sel -contains 'temp') {
+        Invoke-Etapa $R 'Arquivos temporários - remover' {
+            $tot = 0
+            foreach ($p in @($env:TEMP, "$env:windir\Temp")) {
+                $antes = [double](Get-ChildItem $p -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+                Remove-Item -Path (Join-Path $p '*') -Recurse -Force -ErrorAction SilentlyContinue
+                $dep = [double](Get-ChildItem $p -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+                $tot += [math]::Max(0, $antes - $dep)
+            }
+            Add-Acao $R 'Limpeza' 'Arquivos temporários removidos' '-' ('Sucesso ({0:N2} GB)' -f ($tot / 1GB))
+            'Concluído ({0:N2} GB liberados)' -f ($tot / 1GB)
+        }
+    }
+    if ($sel -contains 'fimtarefa') { Invoke-Etapa $R 'Finalizar tarefa com botão direito - ativar' { Set-RegTweak $R 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings' 'TaskbarEndTask' 1 } }
+    $R
+}
+
+# ---------------------------------------------------------------------
+# Solucionar problemas: reparos gerais + correções dos achados da auditoria
+# ---------------------------------------------------------------------
+function Get-ListaCorrecoes {
+    $ach = @(Get-TodosAchados)
+    $tem = { param($rx) [bool](@($ach | Where-Object { $_.Achado -match $rx }).Count) }
+    $semNet = $Global:Resultados.Contains('rede') -and ($Global:Resultados['rede'].Metricas.Internet -eq $false)
+    $l = New-Object System.Collections.ArrayList
+    $add = { param($id, $nome, $desc, $marc, $grupo) [void]$l.Add(@{ Id = $id; Nome = $nome; Desc = $desc; Marcado = [bool]$marc; Grupo = $grupo }) }
+    & $add 'restauracao' 'Criar ponto de restauração' 'Permite voltar o sistema ao estado anterior aos reparos.' $true 'Segurança'
+    # correções dos problemas encontrados (só aparecem se o problema existir)
+    if (& $tem 'Firewall DESATIVADO') { & $add 'firewall' 'Ativar o Firewall do Windows' 'Ativa o firewall em todos os perfis desativados.' $true 'Problema encontrado' }
+    if (& $tem 'tempo real do Microsoft Defender DESATIVADA') { & $add 'temporeal' 'Ativar proteção em tempo real do Defender' 'Set-MpPreference -DisableRealtimeMonitoring $false' $true 'Problema encontrado' }
+    if (& $tem 'por política') { & $add 'politicas' 'Remover políticas que desativam Defender/Windows Update' 'Remove DisableAntiSpyware, DisableRealtimeMonitoring e NoAutoUpdate.' $true 'Problema encontrado' }
+    if (& $tem 'serviço Windows Update está desativado') { & $add 'wuservico' 'Reativar o serviço Windows Update' 'Define o serviço wuauserv como Manual.' $true 'Problema encontrado' }
+    if (& $tem 'SMBv1') { & $add 'smb1' 'Desativar o protocolo SMBv1' 'Protocolo antigo e vulnerável (WannaCry).' $true 'Problema encontrado' }
+    if (& $tem 'Convidado') { & $add 'convidado' 'Desativar a conta Convidado' 'Disable-LocalUser na conta Guest.' $true 'Problema encontrado' }
+    if (& $tem 'UAC') { & $add 'uac' 'Reativar o UAC' 'EnableLUA=1 e ConsentPromptBehaviorAdmin=5 (requer reinício).' $true 'Problema encontrado' }
+    if (& $tem 'WDigest') { & $add 'wdigest' 'Desativar WDigest' 'Impede senhas em texto puro na memória.' $true 'Problema encontrado' }
+    if (& $tem 'sem autenticação em nível de rede') { & $add 'rdpnla' 'Exigir NLA na Área de Trabalho Remota' 'UserAuthentication=1.' $true 'Problema encontrado' }
+    if (& $tem 'AutoRun') { & $add 'autorun' 'Desativar AutoRun de mídias removíveis' 'NoDriveTypeAutoRun=255.' $true 'Problema encontrado' }
+    if (& $tem 'SmartScreen desativado') { & $add 'smartscreen' 'Reativar o SmartScreen' 'SmartScreenEnabled=Warn.' $true 'Problema encontrado' }
+    if (& $tem 'PUA') { & $add 'pua' 'Bloquear aplicativos potencialmente indesejados (PUA)' 'Set-MpPreference -PUAProtection Enabled' $true 'Problema encontrado' }
+    if (& $tem 'Sem bloqueio de conta') { & $add 'bloqueio' 'Bloquear conta após 10 senhas erradas' 'net accounts /lockoutthreshold:10 /lockoutduration:15 /lockoutwindow:15' $true 'Problema encontrado' }
+    if (& $tem 'Serviço de áudio') { & $add 'audio' 'Iniciar serviços de áudio' 'Audiosrv e AudioEndpointBuilder em Automático e iniciados.' $true 'Problema encontrado' }
+    # reparos gerais do Windows
+    & $add 'dism' 'DISM - reparar imagem do Windows (RestoreHealth)' 'DISM /Online /Cleanup-Image /RestoreHealth (10 a 30 min, usa internet).' $true 'Reparo do sistema'
+    & $add 'sfc' 'SFC - verificar e reparar arquivos do sistema' 'sfc /scannow (5 a 20 min). Executado depois do DISM.' $true 'Reparo do sistema'
+    & $add 'chkdsk' 'CHKDSK - verificar o disco (online)' "chkdsk $env:SystemDrive /scan - verifica sem reiniciar." $true 'Reparo do sistema'
+    & $add 'chkdskboot' 'CHKDSK completo no próximo reinício' "Marca o disco $env:SystemDrive para reparo (chkdsk /f) ao reiniciar." (& $tem 'erro\(s\) de disco|erros? de leitura|SMART|COM FALHA|ALERTA') 'Reparo do sistema'
+    & $add 'assinaturas' 'Atualizar definições do antivírus' 'Update-MpSignature.' $true 'Reparo do sistema'
+    & $add 'wureset' 'Redefinir componentes do Windows Update' 'Para serviços, renomeia SoftwareDistribution e catroot2 e reinicia.' (& $tem 'falhas de instalação|Nenhuma atualização do Windows instalada') 'Atualizações'
+    & $add 'wuinstalar' 'Instalar atualizações pendentes do Windows' 'Baixa e instala pelo Windows Update (pode demorar e pedir reinício).' (& $tem 'pendente') 'Atualizações'
+    & $add 'winget' 'Atualizar todos os programas (winget)' 'winget upgrade --all. Programas abertos podem ser fechados.' $false 'Atualizações'
+    & $add 'temp' 'Limpar arquivos temporários' '%TEMP% e C:\Windows\Temp.' $true 'Limpeza'
+    & $add 'dns' 'Limpar cache de DNS' 'ipconfig /flushdns.' $true 'Rede'
+    & $add 'rede' 'Redefinir pilha de rede (Winsock/TCP-IP)' 'netsh winsock reset e netsh int ip reset (requer reinício).' $semNet 'Rede'
+    return , $l
+}
+
+$Global:CodigoCorrigir = {
+    $R = New-R
+    $sel = @($Cfg.Selecao)
+    $drv = $env:SystemDrive
+    Log 'Solucionar problemas - início'
+    if ($sel -contains 'restauracao') { Invoke-Etapa $R 'Ponto de restauração' { New-PontoRestauracao $R 'AuditorTI - antes dos reparos' } }
+    if ($sel -contains 'firewall') {
+        Invoke-Etapa $R 'Ativar o Firewall do Windows' {
+            foreach ($p in @(Get-NetFirewallProfile -PolicyStore ActiveStore | Where-Object { [string]$_.Enabled -notin @('True', '1') })) {
+                Set-NetFirewallProfile -Name $p.Name -Enabled True -ErrorAction Stop
+                Add-Acao $R 'Firewall' "Perfil $($p.Name) ativado" 'Desativado' 'Sucesso' "Set-NetFirewallProfile -Name '$($p.Name)' -Enabled False"
+            }
+        }
+    }
+    if ($sel -contains 'temporeal') {
+        Invoke-Etapa $R 'Ativar proteção em tempo real' {
+            Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop
+            Add-Acao $R 'Defender' 'Proteção em tempo real ativada' 'Desativada' 'Sucesso' 'Set-MpPreference -DisableRealtimeMonitoring $true'
+        }
+    }
+    if ($sel -contains 'politicas') {
+        Invoke-Etapa $R 'Remover políticas que desativam proteções' {
+            Set-RegTweak $R 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender' 'DisableAntiSpyware' '<RemoveEntry>'
+            Set-RegTweak $R 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection' 'DisableRealtimeMonitoring' '<RemoveEntry>'
+            Set-RegTweak $R 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' 'NoAutoUpdate' '<RemoveEntry>'
+        }
+    }
+    if ($sel -contains 'wuservico') { Invoke-Etapa $R 'Reativar o serviço Windows Update' { Set-SvcTweak $R 'wuauserv' 'Manual' } }
+    if ($sel -contains 'smb1') {
+        Invoke-Etapa $R 'Desativar SMBv1' {
+            Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force -ErrorAction Stop
+            Add-Acao $R 'Rede' 'SMBv1 desativado' 'Ativado' 'Sucesso' 'Set-SmbServerConfiguration -EnableSMB1Protocol $true -Force'
+        }
+    }
+    if ($sel -contains 'convidado') {
+        Invoke-Etapa $R 'Desativar conta Convidado' {
+            foreach ($u in @(Get-LocalUser | Where-Object { [string]$_.SID -match '-501$' -and $_.Enabled })) {
+                Disable-LocalUser -SID $u.SID -ErrorAction Stop
+                Add-Acao $R 'Conta' "$($u.Name) desativada" 'Ativa' 'Sucesso' "Enable-LocalUser -SID '$($u.SID)'"
+            }
+        }
+    }
+    if ($sel -contains 'uac') {
+        Invoke-Etapa $R 'Reativar o UAC' {
+            $p = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+            Set-RegTweak $R $p 'EnableLUA' 1
+            if ((Get-RegVal $p 'ConsentPromptBehaviorAdmin') -eq 0) { Set-RegTweak $R $p 'ConsentPromptBehaviorAdmin' 5 }
+            'Concluído (vale após reiniciar)'
+        }
+    }
+    if ($sel -contains 'wdigest') { Invoke-Etapa $R 'Desativar WDigest' { Set-RegTweak $R 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest' 'UseLogonCredential' 0 } }
+    if ($sel -contains 'rdpnla') { Invoke-Etapa $R 'Exigir NLA no RDP' { Set-RegTweak $R 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' 'UserAuthentication' 1 } }
+    if ($sel -contains 'autorun') { Invoke-Etapa $R 'Desativar AutoRun' { Set-RegTweak $R 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer' 'NoDriveTypeAutoRun' 255 } }
+    if ($sel -contains 'smartscreen') {
+        Invoke-Etapa $R 'Reativar SmartScreen' {
+            Set-RegTweak $R 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer' 'SmartScreenEnabled' 'Warn' 'String'
+            if ((Get-RegVal 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'EnableSmartScreen') -eq 0) { Set-RegTweak $R 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' 'EnableSmartScreen' '<RemoveEntry>' }
+        }
+    }
+    if ($sel -contains 'pua') {
+        Invoke-Etapa $R 'Bloquear PUA no Defender' {
+            Set-MpPreference -PUAProtection Enabled -ErrorAction Stop
+            Add-Acao $R 'Defender' 'Proteção contra PUA ativada' 'Desativada' 'Sucesso' 'Set-MpPreference -PUAProtection Disabled'
+        }
+    }
+    if ($sel -contains 'bloqueio') {
+        Invoke-Etapa $R 'Bloqueio de conta após senhas erradas' {
+            $o = Invoke-Cmd "$env:windir\System32\net.exe" 'accounts /lockoutthreshold:10 /lockoutduration:15 /lockoutwindow:15' 30000
+            Add-Acao $R 'Política de senha' 'Bloqueio após 10 tentativas por 15 min' 'Sem bloqueio' $(if ($global:UltimoCodigo -eq 0) { 'Sucesso' } else { "Falha: $(Get-Resumo $o 1)" }) "& `"$env:windir\System32\net.exe`" accounts /lockoutthreshold:0"
+            if ($global:UltimoCodigo -eq 0) { 'Concluído' } else { "Falha: $(Get-Resumo $o 1)" }
+        }
+    }
+    if ($sel -contains 'audio') {
+        Invoke-Etapa $R 'Iniciar serviços de áudio' {
+            foreach ($n in @('AudioEndpointBuilder', 'Audiosrv')) { Set-SvcTweak $R $n 'Automatic'; Start-Service -Name $n -ErrorAction Stop }
+        }
+    }
+    if ($sel -contains 'dism') {
+        Invoke-Etapa $R 'DISM /RestoreHealth' {
+            Log '   (pode levar de 10 a 30 minutos - aguarde)'
+            $o = Invoke-Cmd "$env:windir\System32\dism.exe" '/Online /Cleanup-Image /RestoreHealth' 5400000
+            $cod = $global:UltimoCodigo
+            Add-Acao $R 'Reparo' 'DISM /Online /Cleanup-Image /RestoreHealth' '-' $(if ($cod -eq 0) { 'Sucesso' } else { "Código $cod" })
+            if ($cod -eq 0) { "Concluído - $(Get-Resumo $o 1)" } else { "ATENÇÃO: código $cod - $(Get-Resumo $o 2)" }
+        }
+    }
+    if ($sel -contains 'sfc') {
+        Invoke-Etapa $R 'SFC /scannow' {
+            Log '   (pode levar de 5 a 20 minutos - aguarde)'
+            $o = Invoke-Cmd "$env:windir\System32\sfc.exe" '/scannow' 5400000
+            $cod = $global:UltimoCodigo
+            $cbs = ''
+            if ($o -match '(?i)n(ã|a)o encontrou nenhuma viola|did not find any integrity') { $cbs = 'Nenhum problema encontrado' }
+            elseif ($o -match '(?i)reparou|successfully repaired') { $cbs = 'Arquivos corrompidos foram REPARADOS' }
+            elseif ($o -match '(?i)n(ã|a)o p(ô|o)de reparar|unable to fix') { $cbs = 'ATENÇÃO: arquivos corrompidos que NÃO puderam ser reparados (ver C:\Windows\Logs\CBS\CBS.log)' }
+            else { $cbs = Get-Resumo $o 1 }
+            Add-Acao $R 'Reparo' 'sfc /scannow' '-' $cbs
+            $cbs
+        }
+    }
+    if ($sel -contains 'chkdsk') {
+        Invoke-Etapa $R "CHKDSK $drv /scan" {
+            $o = Invoke-Cmd "$env:windir\System32\chkdsk.exe" "$drv /scan" 3600000
+            $cod = $global:UltimoCodigo
+            $txt = switch ($cod) { 0 { 'Nenhum erro encontrado' } 1 { 'Erros encontrados e corrigidos' } 2 { 'Limpeza realizada' } 3 { 'ATENÇÃO: erros encontrados que exigem chkdsk /f no reinício' } default { "Código $cod - $(Get-Resumo $o 1)" } }
+            Add-Acao $R 'Reparo' "chkdsk $drv /scan" '-' $txt
+            $txt
+        }
+    }
+    if ($sel -contains 'chkdskboot') {
+        Invoke-Etapa $R 'Agendar CHKDSK completo no reinício' {
+            $o = Invoke-Cmd "$env:windir\System32\fsutil.exe" "dirty set $drv" 30000
+            Add-Acao $R 'Reparo' "Disco $drv marcado para chkdsk /f no próximo reinício" '-' $(if ($global:UltimoCodigo -eq 0) { 'Sucesso' } else { "Falha: $(Get-Resumo $o 1)" })
+            if ($global:UltimoCodigo -eq 0) { 'Agendado - reinicie o computador (a verificação pode demorar)' } else { "Falha: $(Get-Resumo $o 1)" }
+        }
+    }
+    if ($sel -contains 'assinaturas') {
+        Invoke-Etapa $R 'Atualizar definições do antivírus' {
+            Update-MpSignature -ErrorAction Stop
+            $mp = Get-MpComputerStatus
+            Add-Acao $R 'Defender' 'Definições atualizadas' '-' ("Sucesso ({0})" -f $mp.AntivirusSignatureVersion)
+            "Concluído - versão $($mp.AntivirusSignatureVersion)"
+        }
+    }
+    if ($sel -contains 'wureset') {
+        Invoke-Etapa $R 'Redefinir componentes do Windows Update' {
+            $svcs = @('wuauserv', 'bits', 'cryptsvc', 'msiserver')
+            foreach ($s in $svcs) { Stop-Service -Name $s -Force -ErrorAction SilentlyContinue }
+            $ts = Get-Date -Format 'yyyyMMddHHmmss'
+            foreach ($p in @("$env:windir\SoftwareDistribution", "$env:windir\System32\catroot2")) {
+                if (Test-Path $p) { Rename-Item -Path $p -NewName ((Split-Path $p -Leaf) + ".bak_$ts") -ErrorAction Stop }
+            }
+            foreach ($s in $svcs) { Start-Service -Name $s -ErrorAction SilentlyContinue }
+            Add-Acao $R 'Windows Update' "Componentes redefinidos (pastas antigas: *.bak_$ts)" '-' 'Sucesso'
+        }
+    }
+    if ($sel -contains 'wuinstalar') {
+        Invoke-Etapa $R 'Instalar atualizações pendentes do Windows' {
+            $sess = New-Object -ComObject Microsoft.Update.Session
+            Log '   procurando atualizações...'
+            $busca = $sess.CreateUpdateSearcher().Search("IsInstalled=0 and IsHidden=0 and Type='Software'")
+            if ($busca.Updates.Count -eq 0) { return 'Nenhuma atualização pendente' }
+            $col = New-Object -ComObject Microsoft.Update.UpdateColl
+            for ($i = 0; $i -lt $busca.Updates.Count; $i++) { $u = $busca.Updates.Item($i); if (-not $u.EulaAccepted) { $u.AcceptEula() }; [void]$col.Add($u); Log "   - $($u.Title)" }
+            Log "   baixando $($col.Count) atualização(ões)..."
+            $d = $sess.CreateUpdateDownloader(); $d.Updates = $col; [void]$d.Download()
+            Log '   instalando...'
+            $ins = $sess.CreateUpdateInstaller(); $ins.Updates = $col; $r2 = $ins.Install()
+            $ok = 0; for ($i = 0; $i -lt $col.Count; $i++) { if ($r2.GetUpdateResult($i).ResultCode -in 2, 3) { $ok++ } }
+            Add-Acao $R 'Windows Update' "$ok de $($col.Count) atualização(ões) instaladas" '-' $(if ($r2.RebootRequired) { 'Sucesso - REINÍCIO NECESSÁRIO' } else { 'Sucesso' })
+            "$ok de $($col.Count) instaladas$(if ($r2.RebootRequired) { ' - reinício necessário' })"
+        }
+    }
+    if ($sel -contains 'winget') {
+        Invoke-Etapa $R 'Atualizar programas (winget)' {
+            $wg = (Get-Command winget.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+            if (-not $wg) { $wg = Get-ChildItem "$env:ProgramFiles\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName }
+            if (-not $wg) { return 'winget não disponível' }
+            Log '   (pode demorar - cada programa é baixado e instalado)'
+            $o = Invoke-Cmd $wg 'upgrade --all --silent --include-unknown --accept-package-agreements --accept-source-agreements --disable-interactivity' 3600000 -Utf8
+            Add-Acao $R 'Programas' 'winget upgrade --all' '-' "Código $($global:UltimoCodigo)"
+            "Concluído - $(Get-Resumo $o 1)"
+        }
+    }
+    if ($sel -contains 'temp') {
+        Invoke-Etapa $R 'Limpar arquivos temporários' {
+            $tot = 0
+            $pastas = @("$env:windir\Temp") + @(Get-ChildItem "$env:SystemDrive\Users" -Directory -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName 'AppData\Local\Temp' })
+            foreach ($p in $pastas) {
+                if (-not (Test-Path $p)) { continue }
+                $antes = [double](Get-ChildItem $p -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+                Remove-Item -Path (Join-Path $p '*') -Recurse -Force -ErrorAction SilentlyContinue
+                $dep = [double](Get-ChildItem $p -Recurse -Force -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+                $tot += [math]::Max(0, $antes - $dep)
+            }
+            Add-Acao $R 'Limpeza' 'Arquivos temporários de todos os usuários' '-' ('Sucesso ({0:N2} GB)' -f ($tot / 1GB))
+            'Concluído ({0:N2} GB liberados)' -f ($tot / 1GB)
+        }
+    }
+    if ($sel -contains 'dns') {
+        Invoke-Etapa $R 'Limpar cache de DNS' {
+            Clear-DnsClientCache -ErrorAction Stop
+            Add-Acao $R 'Rede' 'Cache de DNS limpo' '-' 'Sucesso'
+        }
+    }
+    if ($sel -contains 'rede') {
+        Invoke-Etapa $R 'Redefinir pilha de rede' {
+            $o1 = Invoke-Cmd "$env:windir\System32\netsh.exe" 'winsock reset' 60000
+            $o2 = Invoke-Cmd "$env:windir\System32\netsh.exe" 'int ip reset' 60000
+            Add-Acao $R 'Rede' 'netsh winsock reset / int ip reset' '-' 'Sucesso - REINÍCIO NECESSÁRIO'
+            'Concluído - reinicie o computador'
+        }
+    }
+    Log 'Solucionar problemas - fim'
+    $R
+}
+
+# ---------------------------------------------------------------------
+# Ativação LEGÍTIMA do Windows (chave OEM gravada na placa-mãe ou chave
+# de produto informada). Não contorna o licenciamento da Microsoft.
+# ---------------------------------------------------------------------
+$Global:CodigoAtivar = {
+    $R = New-R
+    $cs = "$env:windir\System32\cscript.exe"; $slmgr = "$env:windir\System32\slmgr.vbs"
+    $stMap = @{ 0 = 'Não licenciado'; 1 = 'Ativado'; 2 = 'Período de carência'; 3 = 'Carência adicional'; 4 = 'Não original'; 5 = 'Notificação'; 6 = 'Carência estendida' }
+    $ler = { Get-CimInstance SoftwareLicensingProduct -Filter "ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL" | Select-Object -First 1 }
+    $antes = & $ler
+    $stAntes = $stMap[[int]$antes.LicenseStatus]
+    $chave = [string]$Cfg.Chave; $Cfg.Chave = $null
+    $masc = ''
+    if ($chave) {
+        $masc = 'XXXXX-XXXXX-XXXXX-XXXXX-' + $chave.Substring($chave.Length - 5)
+        Invoke-Etapa $R "Instalar chave de produto ($masc)" {
+            $o = Invoke-Cmd $cs "//nologo `"$slmgr`" /ipk $chave" 120000
+            $o = $o.Replace($chave, $masc)
+            if ($global:UltimoCodigo -ne 0 -or $o -match '(?i)erro|error|0x8') { "Falha: $(Get-Resumo $o 1)" } else { 'Chave instalada' }
+        }
+    }
+    Invoke-Etapa $R 'Ativar junto à Microsoft (slmgr /ato)' {
+        $o = Invoke-Cmd $cs "//nologo `"$slmgr`" /ato" 180000
+        if ($chave) { $o = $o.Replace($chave, $masc) }
+        Get-Resumo $o 1
+    }
+    $dep = & $ler
+    $stDep = $stMap[[int]$dep.LicenseStatus]
+    Add-Item $R 'Situação da licença' "$stDep (antes: $stAntes) - $($dep.Name) - chave final $($dep.PartialProductKey)" $(if ($dep.LicenseStatus -eq 1) { 'OK' } else { 'Atenção' })
+    Add-Acao $R 'Ativação do Windows' $(if ($masc) { "Chave $masc" } else { 'Nova tentativa de ativação' }) "$stAntes (chave final $($antes.PartialProductKey))" $stDep $(if ($masc -and $antes.PartialProductKey) { "# Para voltar à chave anterior, reinstale a chave terminada em $($antes.PartialProductKey) com: slmgr /ipk <chave>" } else { '' })
+    $R
+}
+
+# ---------------------------------------------------------------------
+# Execução de um lote de ações (sem interface)
+# ---------------------------------------------------------------------
+$Global:Lotes = New-Object System.Collections.ArrayList
+function Invoke-LoteCore([string]$Titulo, $Codigo, [int]$Timeout, $Selecao) {
+    $Global:Cfg.Selecao = @($Selecao)
+    Write-LogUI "=== $Titulo ==="
+    $ini = Get-Date
+    $res = Invoke-Teste @{ Codigo = $Codigo; Timeout = $Timeout } $null
+    foreach ($a in @($res.Extra.Acoes)) { if ($a) { [void]$Global:Acoes.Add($a) } }
+    [void]$Global:Lotes.Add(@{ Titulo = $Titulo; Inicio = $ini; Fim = (Get-Date); Itens = @($res.Itens) })
+    Write-LogUI "=== $Titulo concluído ==="
+    return $res
+}
+
+# ---------------------------------------------------------------------
+# Janelas das ações (otimizar, solucionar problemas, ativação)
+# ---------------------------------------------------------------------
+function Show-Itens($itens, [string]$titulo) {
+    $dgv.Rows.Clear(); $lblGrid.Text = $titulo
+    foreach ($i in $itens) { $n = $dgv.Rows.Add($i.Item, $i.Valor, $i.Status); $dgv.Rows[$n].DefaultCellStyle.BackColor = Get-CorSituacao $i.Status }
+}
+
+# Lista com caixas de seleção. Devolve os Ids marcados ou $null se cancelar.
+function Show-DialogoLista([string]$Titulo, [string]$Texto, $Itens, [string]$TextoOk) {
+    $dlg = New-Object Windows.Forms.Form
+    $dlg.Text = $Titulo; $dlg.Size = New-Object Drawing.Size(1000, 600)
+    $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
+    $dlg.Font = New-Object Drawing.Font('Segoe UI', 9)
+    $lb = New-Object Windows.Forms.Label; $lb.Text = $Texto; $lb.Location = New-Object Drawing.Point(12, 10); $lb.Size = New-Object Drawing.Size(960, 56)
+    $lvL = New-Object Windows.Forms.ListView
+    $lvL.View = 'Details'; $lvL.CheckBoxes = $true; $lvL.FullRowSelect = $true; $lvL.GridLines = $true
+    $lvL.Location = New-Object Drawing.Point(12, 70); $lvL.Size = New-Object Drawing.Size(960, 432)
+    [void]$lvL.Columns.Add('Ação', 340); [void]$lvL.Columns.Add('Grupo', 130); [void]$lvL.Columns.Add('Detalhe', 470)
+    foreach ($i in $Itens) {
+        $it = New-Object Windows.Forms.ListViewItem([string]$i.Nome)
+        [void]$it.SubItems.Add([string]$i.Grupo); [void]$it.SubItems.Add([string]$i.Desc)
+        $it.Checked = [bool]$i.Marcado; $it.Tag = $i.Id
+        if ($i.Grupo -eq 'Problema encontrado') { $it.BackColor = [Drawing.Color]::FromArgb(253, 232, 222) }
+        [void]$lvL.Items.Add($it)
+    }
+    $bT = New-Object Windows.Forms.Button; $bT.Text = 'Marcar todos'; $bT.Size = New-Object Drawing.Size(120, 32); $bT.Location = New-Object Drawing.Point(12, 514)
+    $bT.Add_Click({ foreach ($x in $lvL.Items) { $x.Checked = $true } })
+    $bN = New-Object Windows.Forms.Button; $bN.Text = 'Desmarcar todos'; $bN.Size = New-Object Drawing.Size(120, 32); $bN.Location = New-Object Drawing.Point(138, 514)
+    $bN.Add_Click({ foreach ($x in $lvL.Items) { $x.Checked = $false } })
+    $bOk = New-Object Windows.Forms.Button; $bOk.Text = $TextoOk; $bOk.Size = New-Object Drawing.Size(200, 32); $bOk.Location = New-Object Drawing.Point(632, 514); $bOk.DialogResult = 'OK'
+    $bNo = New-Object Windows.Forms.Button; $bNo.Text = 'Cancelar'; $bNo.Size = New-Object Drawing.Size(130, 32); $bNo.Location = New-Object Drawing.Point(842, 514); $bNo.DialogResult = 'Cancel'
+    $dlg.Controls.AddRange(@($lb, $lvL, $bT, $bN, $bOk, $bNo)); $dlg.CancelButton = $bNo
+    if ($dlg.ShowDialog($form) -ne 'OK') { return $null }
+    return , @($lvL.CheckedItems | ForEach-Object { [string]$_.Tag })
+}
+
+function Set-BotoesAcao([bool]$ativo) {
+    foreach ($c in @($btnIniciar, $btnOtimizar, $btnAtivar, $clb, $grp, $txtCliente, $txtOS, $txtTecnico, $btnTimbrado)) { $c.Enabled = $ativo }
+    $btnCorrigir.Enabled = $ativo -and ($Global:Resultados.Count -gt 0)
+    $btnRel.Enabled = $ativo -and ($Global:Resultados.Count -gt 0)
+}
+
+# Executa um lote mostrando o andamento na janela
+function Invoke-Lote([string]$Titulo, $Codigo, [int]$Timeout, $Selecao) {
+    $Global:Rodando = $true; $Global:Cancelar = $false
+    Set-BotoesAcao $false
+    $prog.Style = 'Marquee'
+    $Global:StatusBase = "Executando: $Titulo"
+    $lblStatus.Text = $Global:StatusBase
+    try { $res = Invoke-LoteCore $Titulo $Codigo $Timeout $Selecao }
+    finally {
+        $Global:StatusBase = $null; $prog.Style = 'Blocks'
+        $Global:Rodando = $false
+        Set-BotoesAcao $true
+    }
+    Show-Itens $res.Itens "Resultado: $Titulo"
+    $lblStatus.Text = "$Titulo - concluído."
+    if ($Global:FecharApos) { $form.Close() }
+    return $res
+}
+
+function Invoke-Otimizar {
+    $itens = foreach ($t in $Global:TweaksPadrao) { @{ Id = $t.Id; Nome = $t.Nome; Desc = $t.Desc; Marcado = $true; Grupo = 'Standard' } }
+    $txt = "Mesmos ajustes do modo STANDARD da aba Tweaks do WinUtil (Chris Titus Tech).`r`nO valor anterior de cada alteração é registrado no relatório e no script desfazer_alteracoes.ps1 (exceto limpezas, que não têm volta).`r`nAtenção: 'Serviços - definir como manual' desativa o Compartilhamento de Internet (hotspot do Windows)."
+    $sel = Show-DialogoLista 'Otimizar Windows - preset Standard' $txt $itens 'Aplicar otimizações'
+    if ($null -eq $sel -or -not @($sel).Count) { return }
+    if ([System.Windows.Forms.MessageBox]::Show($form, "Aplicar $(@($sel).Count) otimização(ões) neste computador?", 'Confirmar', 'YesNo', 'Question') -ne 'Yes') { return }
+    $res = Invoke-Lote 'Otimização do Windows (Standard)' $Global:CodigoOtimizar 7200 $sel
+    $f = @($res.Itens | Where-Object { $_.Status -ne 'OK' }).Count
+    [System.Windows.Forms.MessageBox]::Show($form, "Otimização concluída$(if ($f) { " com $f aviso(s) - veja a lista" }).`r`n`r`nReinicie o computador para aplicar todos os ajustes.`r`nAs alterações entram no relatório (gere o PDF novamente se já tinha gerado).", 'AuditorTI', 'OK', 'Information') | Out-Null
+}
+
+function Invoke-Corrigir {
+    $itens = Get-ListaCorrecoes
+    $nProb = @($itens | Where-Object { $_.Grupo -eq 'Problema encontrado' }).Count
+    $txt = "Itens em vermelho corrigem problemas encontrados na auditoria ($nProb). Os demais são reparos gerais do Windows.`r`nDISM e SFC podem levar mais de 30 minutos no total. Não desligue o computador durante o processo.`r`nTudo é registrado no relatório; configurações alteradas entram no script desfazer_alteracoes.ps1."
+    $sel = Show-DialogoLista 'Solucionar problemas encontrados' $txt $itens 'Iniciar reparos'
+    if ($null -eq $sel -or -not @($sel).Count) { return }
+    if ([System.Windows.Forms.MessageBox]::Show($form, "Executar $(@($sel).Count) ação(ões) de reparo agora?", 'Confirmar', 'YesNo', 'Question') -ne 'Yes') { return }
+    $res = Invoke-Lote 'Solucionar problemas' $Global:CodigoCorrigir 10800 $sel
+    $f = @($res.Itens | Where-Object { $_.Status -ne 'OK' }).Count
+    $r = [System.Windows.Forms.MessageBox]::Show($form, "Reparos concluídos$(if ($f) { " ($f item(ns) com aviso - veja a lista)" }).`r`n`r`nRecomendado: reiniciar o computador e executar a auditoria novamente para comparar as notas.`r`n`r`nDeseja executar a auditoria novamente agora (sem reiniciar)?", 'AuditorTI', 'YesNo', 'Information')
+    if ($r -eq 'Yes') { $Global:ManterAcoes = $true; $btnIniciar.PerformClick() }
+}
+
+function Show-Ativacao {
+    $stMap = @{ 0 = 'Não licenciado'; 1 = 'Ativado'; 2 = 'Período de carência'; 3 = 'Carência adicional'; 4 = 'Não original'; 5 = 'Notificação'; 6 = 'Carência estendida' }
+    $lic = Get-CimInstance SoftwareLicensingProduct -Filter "ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL" | Select-Object -First 1
+    $svc = Get-CimInstance SoftwareLicensingService
+    $oem = [string]$svc.OA3xOriginalProductKey
+    $dlg = New-Object Windows.Forms.Form
+    $dlg.Text = 'Ativação do Windows (licença legítima)'; $dlg.Size = New-Object Drawing.Size(620, 360)
+    $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false; $dlg.Font = New-Object Drawing.Font('Segoe UI', 9)
+    $st = if ($lic) { $stMap[[int]$lic.LicenseStatus] } else { 'Desconhecido' }
+    $info = "Edição: $($lic.Name)`r`nSituação: $st`r`nChave instalada (final): $($lic.PartialProductKey)`r`n`r`n" +
+        $(if ($oem) { "Chave OEM gravada na placa-mãe: XXXXX-XXXXX-XXXXX-XXXXX-$($oem.Substring($oem.Length - 5))`r`n($($svc.OA3xOriginalProductKeyDescription))" } else { 'Nenhuma chave OEM gravada na placa-mãe.' }) +
+        "`r`n`r`nO AuditorTI só ativa com licença válida: a chave original do equipamento ou uma chave comprada. Não é feita nenhuma ativação ilegal."
+    $lb = New-Object Windows.Forms.Label; $lb.Text = $info; $lb.Location = New-Object Drawing.Point(14, 12); $lb.Size = New-Object Drawing.Size(580, 200)
+    $b1 = New-Object Windows.Forms.Button; $b1.Text = 'Ativar com a chave da placa'; $b1.Size = New-Object Drawing.Size(190, 34); $b1.Location = New-Object Drawing.Point(14, 222); $b1.Enabled = [bool]$oem
+    $b2 = New-Object Windows.Forms.Button; $b2.Text = 'Informar chave de produto...'; $b2.Size = New-Object Drawing.Size(190, 34); $b2.Location = New-Object Drawing.Point(210, 222)
+    $b3 = New-Object Windows.Forms.Button; $b3.Text = 'Tentar ativar novamente'; $b3.Size = New-Object Drawing.Size(180, 34); $b3.Location = New-Object Drawing.Point(406, 222)
+    $b4 = New-Object Windows.Forms.Button; $b4.Text = 'Fechar'; $b4.Size = New-Object Drawing.Size(110, 32); $b4.Location = New-Object Drawing.Point(476, 272); $b4.DialogResult = 'Cancel'
+    $b1.Add_Click({ $dlg.Tag = 'oem'; $dlg.DialogResult = 'OK' })
+    $b2.Add_Click({ $dlg.Tag = 'chave'; $dlg.DialogResult = 'OK' })
+    $b3.Add_Click({ $dlg.Tag = 'ato'; $dlg.DialogResult = 'OK' })
+    $dlg.Controls.AddRange(@($lb, $b1, $b2, $b3, $b4)); $dlg.CancelButton = $b4
+    if ($dlg.ShowDialog($form) -ne 'OK') { return }
+    $chave = ''
+    switch ($dlg.Tag) {
+        'oem' { $chave = $oem }
+        'chave' {
+            Add-Type -AssemblyName Microsoft.VisualBasic
+            $chave = ([Microsoft.VisualBasic.Interaction]::InputBox('Digite a chave de produto do Windows (25 caracteres):', 'Chave de produto', '')).Trim().ToUpper()
+            if (-not $chave) { return }
+            if ($chave -notmatch '^[A-Z0-9]{5}(-[A-Z0-9]{5}){4}$') { [System.Windows.Forms.MessageBox]::Show($form, 'Chave inválida. Use o formato XXXXX-XXXXX-XXXXX-XXXXX-XXXXX.', 'Ativação', 'OK', 'Warning') | Out-Null; return }
+        }
+    }
+    $Global:Cfg.Chave = $chave
+    $res = Invoke-Lote 'Ativação do Windows' $Global:CodigoAtivar 600 @()
+    $Global:Cfg.Chave = $null
+    $sit = ($res.Itens | Where-Object { $_.Item -eq 'Situação da licença' } | Select-Object -First 1).Valor
+    [System.Windows.Forms.MessageBox]::Show($form, "Resultado: $sit`r`n`r`nSe falhar, verifique a internet e se a chave corresponde à edição instalada (Home/Pro).", 'Ativação do Windows', 'OK', 'Information') | Out-Null
+}
+
 # ---------------------------------------------------------------------
 # Modo sem interface (linha de comando / verificação automática)
 #   AuditorTI.ps1 -SemInterface -Cliente "Nome" [-Timbrado arquivo.png] [-Saida pasta]
@@ -1943,6 +2571,16 @@ if ($SemInterface) {
     $Global:Fim = Get-Date
     $nt = Get-Notas
     Write-LogUI ("NOTAS -> Desempenho: {0} | Segurança: {1}" -f (Format-Nota $nt.Desempenho), (Format-Nota $nt.Seguranca))
+    if ($Otimizar) {
+        $ids = if ($Otimizar -eq 'todos') { @($Global:TweaksPadrao | ForEach-Object { $_.Id }) } else { @($Otimizar -split '[,; ]+' | Where-Object { $_ }) }
+        $r1 = Invoke-LoteCore 'Otimização do Windows (Standard)' $Global:CodigoOtimizar 7200 $ids
+        foreach ($i in $r1.Itens) { Write-LogUI ("  [{0}] {1}: {2}" -f $i.Status, $i.Item, $i.Valor) }
+    }
+    if ($Corrigir) {
+        $ids = @($Corrigir -split '[,; ]+' | Where-Object { $_ })
+        $r2 = Invoke-LoteCore 'Solucionar problemas' $Global:CodigoCorrigir 10800 $ids
+        foreach ($i in $r2.Itens) { Write-LogUI ("  [{0}] {1}: {2}" -f $i.Status, $i.Item, $i.Valor) }
+    }
     $tb = $null; if ($Timbrado -and (Test-Path $Timbrado)) { $tb = (Resolve-Path $Timbrado).Path }
     $rel = New-Relatorio @{ Cliente = $Cliente; Tecnico = $Tecnico; OS = ''; Timbrado = $tb; MargemTopo = 40; MargemBase = 28; MargemLado = 18 }
     Write-LogUI "Relatório: $($rel.Pasta)"
@@ -2023,7 +2661,14 @@ $dgv.DefaultCellStyle.WrapMode = 'True'; $dgv.AutoSizeRowsMode = 'AllCells'; $dg
 $dgv.Columns[0].Width = 270; $dgv.Columns[1].AutoSizeMode = 'Fill'; $dgv.Columns[2].Width = 90
 $txtLog = New-Object Windows.Forms.TextBox; $txtLog.Dock = 'Bottom'; $txtLog.Height = 120; $txtLog.Multiline = $true; $txtLog.ScrollBars = 'Vertical'; $txtLog.ReadOnly = $true
 $txtLog.Font = New-Object Drawing.Font('Consolas', 8.5); $txtLog.BackColor = [Drawing.Color]::FromArgb(250, 250, 250)
-$pDir.Controls.Add($dgv); $pDir.Controls.Add($lblGrid); $pDir.Controls.Add($lv); $pDir.Controls.Add($esp1); $pDir.Controls.Add($prog); $pDir.Controls.Add($lblStatus); $pDir.Controls.Add($txtLog)
+$pAcoes = New-Object Windows.Forms.FlowLayoutPanel; $pAcoes.Dock = 'Top'; $pAcoes.Height = 44; $pAcoes.WrapContents = $false
+$btnCorrigir = New-Object Windows.Forms.Button; $btnCorrigir.Text = 'Solucionar problemas'; $btnCorrigir.Size = New-Object Drawing.Size(190, 36); $btnCorrigir.Enabled = $false
+$btnCorrigir.BackColor = [Drawing.Color]::FromArgb(230, 81, 0); $btnCorrigir.ForeColor = 'White'; $btnCorrigir.FlatStyle = 'Flat'; $btnCorrigir.Font = New-Object Drawing.Font('Segoe UI', 9.5, [Drawing.FontStyle]::Bold)
+$btnOtimizar = New-Object Windows.Forms.Button; $btnOtimizar.Text = 'Otimizar Windows (Standard)'; $btnOtimizar.Size = New-Object Drawing.Size(210, 36)
+$btnOtimizar.BackColor = [Drawing.Color]::FromArgb(18, 52, 86); $btnOtimizar.ForeColor = 'White'; $btnOtimizar.FlatStyle = 'Flat'; $btnOtimizar.Font = New-Object Drawing.Font('Segoe UI', 9.5, [Drawing.FontStyle]::Bold)
+$btnAtivar = New-Object Windows.Forms.Button; $btnAtivar.Text = 'Ativação do Windows'; $btnAtivar.Size = New-Object Drawing.Size(170, 36); $btnAtivar.FlatStyle = 'Flat'
+$pAcoes.Controls.AddRange(@($btnCorrigir, $btnOtimizar, $btnAtivar))
+$pDir.Controls.Add($dgv); $pDir.Controls.Add($lblGrid); $pDir.Controls.Add($lv); $pDir.Controls.Add($esp1); $pDir.Controls.Add($prog); $pDir.Controls.Add($lblStatus); $pDir.Controls.Add($pAcoes); $pDir.Controls.Add($txtLog)
 $dgv.BringToFront()
 
 $form.Controls.Add($pDir); $form.Controls.Add($pEsq); $form.Controls.Add($pTopo)
@@ -2053,6 +2698,10 @@ $btnTimbrado.Add_Click({
 $btnSemTimb.Add_LinkClicked({ $Global:Timbrado = $null; $lblTimbrado.Text = '(nenhum)'; Save-Config })
 
 $lv.Add_SelectedIndexChanged({ if ($lv.SelectedItems.Count -and -not $Global:Rodando) { Show-Resultado ([string]$lv.SelectedItems[0].Tag) } })
+
+$btnCorrigir.Add_Click({ Invoke-Corrigir })
+$btnOtimizar.Add_Click({ Invoke-Otimizar })
+$btnAtivar.Add_Click({ Show-Ativacao })
 
 $btnPasta.Add_Click({ if ($Global:UltimaPasta -and (Test-Path $Global:UltimaPasta)) { Start-Process explorer.exe $Global:UltimaPasta } })
 
@@ -2084,10 +2733,15 @@ $btnIniciar.Add_Click({
     $sel = @(); for ($i = 0; $i -lt $Global:Testes.Count; $i++) { if ($clb.GetItemChecked($i)) { $sel += $Global:Testes[$i] } }
     if (-not $sel.Count) { [System.Windows.Forms.MessageBox]::Show($form, 'Selecione ao menos um teste.', 'AuditorTI', 'OK', 'Information') | Out-Null; return }
     Save-Config
+    $manter = [bool]$Global:ManterAcoes; $Global:ManterAcoes = $false
+    if (-not $manter -and ($Global:Acoes.Count -or $Global:Lotes.Count)) {
+        $manter = ([System.Windows.Forms.MessageBox]::Show($form, 'Há manutenções/alterações registradas nesta sessão.' + [Environment]::NewLine + 'Manter esse registro no relatório da nova auditoria? (Sim = mesmo cliente / Não = novo cliente)', 'AuditorTI', 'YesNo', 'Question') -eq 'Yes')
+    }
     $Global:Rodando = $true; $Global:Cancelar = $false
-    foreach ($c in @($btnIniciar, $btnRel, $btnPasta, $clb, $grp, $txtCliente, $txtOS, $txtTecnico, $btnTimbrado)) { $c.Enabled = $false }
+    Set-BotoesAcao $false; $btnPasta.Enabled = $false
     $Global:Cfg.TesteDisco = $chkDisco.Checked; $Global:Cfg.BuscarWU = $chkWU.Checked; $Global:Cfg.Winget = $chkWinget.Checked; $Global:Cfg.TesteSom = $chkSom.Checked
-    $Global:Resultados.Clear(); $Global:Prints.Clear(); $Global:Acoes.Clear(); $Global:LogGeral.Clear(); $txtLog.Clear(); $dgv.Rows.Clear()
+    $Global:Resultados.Clear(); $Global:Prints.Clear(); $txtLog.Clear(); $dgv.Rows.Clear()
+    if (-not $manter) { $Global:Acoes.Clear(); $Global:Lotes.Clear(); $Global:LogGeral.Clear() }
     foreach ($it in $lv.Items) { $it.SubItems[1].Text = $(if ($sel.Id -contains $it.Tag) { 'Aguardando' } else { 'Não executado' }); $it.SubItems[2].Text = ''; $it.SubItems[3].Text = ''; $it.BackColor = [Drawing.Color]::White }
     $Global:Inicio = Get-Date
     $Global:IdAud = 'AUD-{0}-{1}' -f $Global:Inicio.ToString('yyyyMMdd-HHmm'), ([guid]::NewGuid().ToString('N').Substring(0, 4).ToUpper())
@@ -2122,14 +2776,13 @@ $btnIniciar.Add_Click({
     }
     $Global:Fim = Get-Date
     $Global:Rodando = $false
-    foreach ($c in @($btnIniciar, $clb, $grp, $txtCliente, $txtOS, $txtTecnico, $btnTimbrado)) { $c.Enabled = $true }
+    Set-BotoesAcao $true
     if ($Global:FecharApos) { $form.Close(); return }
     if ($Global:Resultados.Count) {
-        $btnRel.Enabled = $true
         $nt = Get-Notas
         $lblStatus.Text = "Concluído!  Desempenho: $(Format-Nota $nt.Desempenho)/10 ($((Get-Conceito $nt.Desempenho)[0]))   |   Segurança: $(Format-Nota $nt.Seguranca)/10 ($((Get-Conceito $nt.Seguranca)[0]))"
         Write-LogUI $lblStatus.Text
-        $r = [System.Windows.Forms.MessageBox]::Show($form, "Auditoria concluída.`r`n`r`nNota de desempenho: $(Format-Nota $nt.Desempenho) / 10`r`nNota de segurança: $(Format-Nota $nt.Seguranca) / 10`r`n`r`nDeseja gerar o relatório em PDF agora?", 'AuditorTI', 'YesNo', 'Information')
+        $r = [System.Windows.Forms.MessageBox]::Show($form, "Auditoria concluída.`r`n`r`nNota de desempenho: $(Format-Nota $nt.Desempenho) / 10`r`nNota de segurança: $(Format-Nota $nt.Seguranca) / 10`r`n`r`nPara corrigir o que foi encontrado, use o botão 'Solucionar problemas'.`r`n`r`nDeseja gerar o relatório em PDF agora?", 'AuditorTI', 'YesNo', 'Information')
         if ($r -eq 'Yes') { $btnRel.PerformClick() }
     }
 })
@@ -2137,7 +2790,7 @@ $btnIniciar.Add_Click({
 $form.Add_FormClosing({
     param($s, $e)
     if ($Global:Rodando) {
-        $r = [System.Windows.Forms.MessageBox]::Show($form, 'Há uma auditoria em andamento. Deseja interromper e sair?', 'AuditorTI', 'YesNo', 'Warning')
+        $r = [System.Windows.Forms.MessageBox]::Show($form, 'Há uma tarefa em andamento. Deseja interromper e sair?' + [Environment]::NewLine + '(Reparos como DISM/SFC já iniciados continuam rodando em segundo plano até terminar.)', 'AuditorTI', 'YesNo', 'Warning')
         $e.Cancel = $true
         if ($r -eq 'Yes') { $Global:Cancelar = $true; $Global:FecharApos = $true }
     }
