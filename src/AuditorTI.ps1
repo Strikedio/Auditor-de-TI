@@ -19,7 +19,7 @@ param(
     [string]$Corrigir = ''      # (sem interface) ids dos reparos, separados por vírgula
 )
 
-$Global:VersaoApp = '1.2.0'
+$Global:VersaoApp = '1.3.0'
 $ErrorActionPreference = 'Continue'
 try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop } catch {}
 
@@ -444,8 +444,8 @@ $Global:Testes = @(
 }}
 
 # ---------------------------------------------------------------------
-@{ Id = 'memoria'; Nome = 'Memória RAM'; Timeout = 90
-   Desc = 'Quantidade instalada, uso atual, módulos e slots livres, tipo/velocidade, memória virtual e processos que mais consomem.'
+@{ Id = 'memoria'; Nome = 'Memória RAM'; Timeout = 700
+   Desc = 'Quantidade instalada, uso atual, módulos e slots livres, tipo/velocidade, memória virtual, processos que mais consomem e teste de integridade da RAM (padrões de memória, estilo MemTest).'
    Codigo = {
     $R = New-R
     Log 'Lendo módulos de memória RAM...'
@@ -488,6 +488,60 @@ $Global:Testes = @(
     if ($uso -ge 90) { Add-Achado $R 'Desempenho' 'Alto' "Memória RAM com $uso% de uso no momento da auditoria." 'Fechar/remover programas que consomem muita memória e avaliar upgrade de RAM.' 1 }
     elseif ($uso -ge 80) { Add-Achado $R 'Desempenho' 'Médio' "Memória RAM com $uso% de uso no momento da auditoria." 'Revisar programas em segundo plano e na inicialização.' 0.5 }
     if ($mods.Count -eq 1 -and $slots -ge 2) { Add-Achado $R 'Desempenho' 'Info' 'Apenas um módulo de memória instalado (single channel).' "Instalar um segundo módulo idêntico ($tipo, mesma capacidade e velocidade) para ativar o dual channel e ganhar desempenho, principalmente com vídeo integrado." 0 -Upgrade }
+    if ($Cfg.TesteMemoria) {
+        Log 'Teste de integridade da RAM (padrões de memória, estilo MemTest)...'
+        $csmem = @"
+public static class AuditorMem {
+    static byte[][] _b;
+    public static long Alocar(long total, int chunk) {
+        int n = (int)(total / chunk); if (n < 1) n = 1;
+        _b = new byte[n][]; long ok = 0;
+        for (int i=0;i<n;i++){ try { _b[i]=new byte[chunk]; ok+=chunk; } catch { break; } }
+        return ok;
+    }
+    public static long Padrao(byte v) {
+        long e=0;
+        for(int k=0;k<_b.Length;k++){ var a=_b[k]; if(a==null)continue; for(int i=0;i<a.Length;i++)a[i]=v; }
+        for(int k=0;k<_b.Length;k++){ var a=_b[k]; if(a==null)continue; for(int i=0;i<a.Length;i++) if(a[i]!=v) e++; }
+        return e;
+    }
+    public static long Endereco() {
+        long e=0;
+        for(int k=0;k<_b.Length;k++){ var a=_b[k]; if(a==null)continue; for(int i=0;i<a.Length;i++)a[i]=(byte)(i*31+k); }
+        for(int k=0;k<_b.Length;k++){ var a=_b[k]; if(a==null)continue; for(int i=0;i<a.Length;i++) if(a[i]!=(byte)(i*31+k)) e++; }
+        return e;
+    }
+    public static void Liberar(){ _b=null; }
+}
+"@
+        if (-not ('AuditorMem' -as [type])) { Add-Type -TypeDefinition $csmem -ErrorAction SilentlyContinue }
+        if ('AuditorMem' -as [type]) {
+            $osm = Get-CimInstance Win32_OperatingSystem
+            $livreB = [double]$osm.FreePhysicalMemory * 1KB
+            $alvo = [long][math]::Min($livreB * 0.5, 4GB)
+            if ($alvo -lt 256MB) { $alvo = [long][math]::Min([long]($livreB * 0.8), [long]256MB) }
+            try {
+                $aloc = [AuditorMem]::Alocar([long]$alvo, [int]64MB)
+                $erros = [int64]0; $i = 0
+                foreach ($pat in @([byte]0, [byte]255, [byte]85, [byte]170)) {
+                    $i++; Log ("  padrão {0}/5 (0x{1:X2})..." -f $i, $pat)
+                    $erros += [AuditorMem]::Padrao($pat)
+                }
+                Log '  padrão 5/5 (endereçamento)...'
+                $erros += [AuditorMem]::Endereco()
+                [AuditorMem]::Liberar(); [GC]::Collect()
+                $gbTest = [math]::Round($aloc / 1GB, 2)
+                Add-Item $R 'Teste de integridade da RAM' ("{0} erro(s) em {1} GB testados (5 padrões: 00, FF, 55, AA e endereçamento)" -f $erros, $gbTest) $(if ($erros -gt 0) { 'Crítico' } else { 'OK' })
+                $R.Metricas.MemErros = [int64]$erros; $R.Metricas.MemTestGB = $gbTest
+                if ($erros -gt 0) {
+                    Add-Achado $R 'Desempenho' 'Crítico' "O teste encontrou $erros erro(s) de memória em $gbTest GB de RAM testados." 'Forte indício de módulo de memória defeituoso. Testar os módulos um a um, reassentar na placa e rodar o teste completo (Diagnóstico de Memória do Windows pelo reinício ou MemTest86 por pendrive). Substituir o módulo com defeito.' 3 -Upgrade
+                }
+                else { Add-Item $R 'Cobertura do teste de RAM' 'Testada apenas a memória livre no momento (a RAM em uso pelo Windows não entra). Para 100% da memória, agendar o Diagnóstico de Memória do Windows (mdsched) no reinício.' 'Info' }
+            }
+            catch { try { [AuditorMem]::Liberar() } catch {}; Add-Item $R 'Teste de integridade da RAM' "Não concluído: $($_.Exception.Message)" 'Atenção' }
+        }
+    }
+    else { Add-Item $R 'Teste de integridade da RAM' 'Não executado (opção desmarcada)' }
     $R
 }}
 
@@ -537,6 +591,56 @@ $Global:Testes = @(
     }
     Add-Tabela $R 'Discos físicos' $linhas
     if (-not $R.Metricas.TipoSistema) { $R.Metricas.TipoSistema = 'Não identificado' }
+
+    Log 'Lendo atributos S.M.A.R.T. detalhados (estilo CrystalDiskInfo)...'
+    function Get-SmartDetalhado {
+        $nomes = @{ 1 = 'Taxa de erro de leitura'; 3 = 'Tempo de spin-up'; 5 = 'Setores realocados'; 7 = 'Taxa de erro de busca'; 9 = 'Horas ligado'; 10 = 'Tentativas de rotação'; 12 = 'Ciclos de energia'; 173 = 'Desgaste (SSD)'; 177 = 'Desgaste (SSD)'; 184 = 'Erro fim-a-fim'; 187 = 'Erros não corrigíveis reportados'; 188 = 'Command Timeout'; 190 = 'Temperatura do ar'; 194 = 'Temperatura'; 196 = 'Eventos de realocação'; 197 = 'Setores pendentes'; 198 = 'Setores incorrigíveis (offline)'; 199 = 'Erros CRC UDMA (cabo)'; 231 = 'Vida útil restante (SSD)'; 233 = 'Média usada/horas (SSD)'; 241 = 'Total gravado (host)'; 242 = 'Total lido (host)' }
+        $criticos = 5, 10, 184, 187, 196, 197, 198
+        $data = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictData -ErrorAction SilentlyContinue)
+        $thrs = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictThresholds -ErrorAction SilentlyContinue)
+        $drives = @(Get-CimInstance Win32_DiskDrive)
+        $saida = New-Object System.Collections.ArrayList
+        foreach ($d in $data) {
+            $vs = $d.VendorSpecific
+            if (-not $vs -or $vs.Count -lt 362) { continue }
+            $instU = ([string]$d.InstanceName -replace '_0$', '').ToUpper()
+            $dd = $drives | Where-Object { $_.PNPDeviceID -and $instU -eq ([string]$_.PNPDeviceID).ToUpper() } | Select-Object -First 1
+            if (-not $dd) { $dd = $drives | Where-Object { $_.PNPDeviceID -and ($instU -like ('*' + ((([string]$_.PNPDeviceID) -split '\\')[-1]).ToUpper() + '*')) } | Select-Object -First 1 }
+            $modelo = if ($dd -and $dd.Model) { ([string]$dd.Model).Trim() } else { [string]$d.InstanceName }
+            $tmap = @{}
+            $t = $thrs | Where-Object { $_.InstanceName -eq $d.InstanceName } | Select-Object -First 1
+            if ($t -and $t.VendorSpecific) { $tv = $t.VendorSpecific; for ($o = 2; $o + 1 -lt $tv.Count; $o += 12) { $tid = $tv[$o]; if ($tid) { $tmap[[int]$tid] = $tv[$o + 1] } } }
+            $attrs = New-Object System.Collections.ArrayList
+            $alertas = New-Object System.Collections.ArrayList
+            $temp = $null
+            for ($o = 2; $o + 11 -lt $vs.Count; $o += 12) {
+                $id = [int]$vs[$o]
+                if ($id -eq 0) { continue }
+                $cur = [int]$vs[$o + 3]; $wst = [int]$vs[$o + 4]
+                $raw = [int64]0; for ($b = 0; $b -lt 6; $b++) { $raw = $raw -bor ([int64]$vs[$o + 5 + $b] -shl (8 * $b)) }
+                $nome = if ($nomes[$id]) { $nomes[$id] } else { "Atributo $id" }
+                $rawShow = [string]$raw
+                if ($id -eq 194 -or $id -eq 190) { $temp = [int]($raw -band 0xFF); $rawShow = "$temp" }
+                [void]$attrs.Add([pscustomobject]@{ 'ID' = ('{0:X2}' -f $id); 'Atributo' = $nome; 'Atual' = $cur; 'Pior' = $wst; 'Limite' = $(if ($tmap.ContainsKey($id)) { $tmap[$id] } else { '-' }); 'Valor bruto' = $rawShow })
+                if (($criticos -contains $id) -and $raw -gt 0) { [void]$alertas.Add("$nome = $raw") }
+                if ($tmap.ContainsKey($id) -and [int]$tmap[$id] -gt 0 -and $cur -le [int]$tmap[$id]) { [void]$alertas.Add("$nome no limite (atual $cur <= limite $($tmap[$id]))") }
+            }
+            [void]$saida.Add(@{ Modelo = $modelo; Attrs = $attrs; Alertas = @($alertas | Select-Object -Unique); Temp = $temp })
+        }
+        return , $saida
+    }
+    $smart = @()
+    try { $smart = @(Get-SmartDetalhado) } catch { }
+    foreach ($s in $smart) {
+        $estado = if ($s.Alertas.Count) { 'Cuidado' } else { 'Bom' }
+        $txt = $estado
+        if ($s.Temp) { $txt += " - $($s.Temp) °C" }
+        if ($s.Alertas.Count) { $txt += ' - ' + ($s.Alertas -join '; ') }
+        Add-Item $R ("S.M.A.R.T.: {0}" -f $s.Modelo) $txt $(if ($s.Alertas.Count) { 'Atenção' } else { 'OK' })
+        Add-Tabela $R ("Atributos S.M.A.R.T. - {0}" -f $s.Modelo) $s.Attrs
+        if ($s.Alertas.Count) { Add-Achado $R 'Desempenho' 'Alto' ("Disco {0} com atributos S.M.A.R.T. em alerta: {1}." -f $s.Modelo, ($s.Alertas -join '; ')) 'Fazer backup e monitorar de perto. Setores realocados/pendentes/incorrigíveis que aumentam indicam disco em degradação: planejar a substituição. Erros CRC UDMA costumam ser cabo/conector SATA.' 1 -Upgrade }
+    }
+    if (-not $smart.Count) { Add-Item $R 'Atributos S.M.A.R.T. detalhados' 'Não expostos por este disco/controladora (comum em NVMe, USB e RAID) - usar os contadores de confiabilidade e a saúde acima' 'Info' }
 
     Log 'Verificando espaço livre nas unidades...'
     $vols = @(Get-Volume | Where-Object { $_.DriveLetter -and ([string]$_.DriveType -in @('Fixed', '3')) -and $_.Size -gt 0 } | Sort-Object DriveLetter)
@@ -1987,7 +2091,7 @@ function Save-Config {
     try {
         New-Item -ItemType Directory -Path $Global:CfgDir -Force | Out-Null
         @{ Tecnico = $txtTecnico.Text; Timbrado = $Global:Timbrado; Topo = [int]$nudTopo.Value; Base = [int]$nudBase.Value; Lado = [int]$nudLado.Value
-           Disco = $chkDisco.Checked; WU = $chkWU.Checked; Winget = $chkWinget.Checked; Som = $chkSom.Checked } | ConvertTo-Json | Set-Content -Path $Global:CfgArq -Encoding UTF8
+           Disco = $chkDisco.Checked; Memoria = $chkMemoria.Checked; WU = $chkWU.Checked; Winget = $chkWinget.Checked; Som = $chkSom.Checked } | ConvertTo-Json | Set-Content -Path $Global:CfgArq -Encoding UTF8
     } catch {}
 }
 
@@ -2552,7 +2656,7 @@ function Show-Ativacao {
 #   AuditorTI.ps1 -SemInterface -Cliente "Nome" [-Timbrado arquivo.png] [-Saida pasta]
 # ---------------------------------------------------------------------
 if ($SemInterface) {
-    $Global:Cfg.TesteDisco = $true; $Global:Cfg.BuscarWU = $false; $Global:Cfg.Winget = $true; $Global:Cfg.TesteSom = $false
+    $Global:Cfg.TesteDisco = $true; $Global:Cfg.TesteMemoria = $true; $Global:Cfg.BuscarWU = $false; $Global:Cfg.Winget = $true; $Global:Cfg.TesteSom = $false
     if ($Saida) { $Global:PastaRelatorios = $Saida }
     $Global:Inicio = Get-Date
     $Global:IdAud = 'AUD-{0}-{1}' -f $Global:Inicio.ToString('yyyyMMdd-HHmm'), ([guid]::NewGuid().ToString('N').Substring(0, 4).ToUpper())
@@ -2623,12 +2727,13 @@ $lt2 = New-Ctl Label 104 ($y + 22) 50 18 'Rodapé'; $nudBase = New-Ctl NumericUp
 $lt3 = New-Ctl Label 208 ($y + 22) 46 18 'Lados'; $nudLado = New-Ctl NumericUpDown 252 ($y + 19) 48 24
 foreach ($nu in @($nudTopo, $nudBase, $nudLado)) { $nu.Minimum = 5; $nu.Maximum = 120 }
 $nudTopo.Value = 40; $nudBase.Value = 28; $nudLado.Value = 18; $y += 54
-$grp = New-Ctl GroupBox 12 $y 290 118 'Opções'
+$grp = New-Ctl GroupBox 12 $y 290 140 'Opções'
 $chkDisco = New-Ctl CheckBox 10 20 275 20 'Teste de velocidade do disco (~1-2 min)'; $chkDisco.Checked = $true
-$chkWU = New-Ctl CheckBox 10 43 275 20 'Buscar atualizações pendentes do Windows'; $chkWU.Checked = $true
-$chkWinget = New-Ctl CheckBox 10 66 275 20 'Verificar atualizações de programas (winget)'; $chkWinget.Checked = $true
-$chkSom = New-Ctl CheckBox 10 89 275 20 'Teste audível de som (tocar tom)'; $chkSom.Checked = $true
-$grp.Controls.AddRange(@($chkDisco, $chkWU, $chkWinget, $chkSom)); $y += 126
+$chkMemoria = New-Ctl CheckBox 10 43 275 20 'Teste de integridade da RAM (~1 min)'; $chkMemoria.Checked = $true
+$chkWU = New-Ctl CheckBox 10 66 275 20 'Buscar atualizações pendentes do Windows'; $chkWU.Checked = $true
+$chkWinget = New-Ctl CheckBox 10 89 275 20 'Verificar atualizações de programas (winget)'; $chkWinget.Checked = $true
+$chkSom = New-Ctl CheckBox 10 112 275 20 'Teste audível de som (tocar tom)'; $chkSom.Checked = $true
+$grp.Controls.AddRange(@($chkDisco, $chkMemoria, $chkWU, $chkWinget, $chkSom)); $y += 148
 $l6 = New-Ctl Label 12 $y 290 18 'Testes a executar'
 $clb = New-Ctl CheckedListBox 12 ($y + 18) 288 150; $clb.CheckOnClick = $true; $clb.IntegralHeight = $false
 foreach ($t in $Global:Testes) { $i = $clb.Items.Add($t.Nome); $clb.SetItemChecked($i, $true) }
@@ -2683,6 +2788,7 @@ if (Test-Path $Global:CfgArq) {
         if ($c.Base) { $nudBase.Value = [math]::Min(120, [math]::Max(5, [int]$c.Base)) }
         if ($c.Lado) { $nudLado.Value = [math]::Min(120, [math]::Max(5, [int]$c.Lado)) }
         if ($null -ne $c.Disco) { $chkDisco.Checked = [bool]$c.Disco; $chkWU.Checked = [bool]$c.WU; $chkWinget.Checked = [bool]$c.Winget; $chkSom.Checked = [bool]$c.Som }
+        if ($null -ne $c.Memoria) { $chkMemoria.Checked = [bool]$c.Memoria }
     } catch {}
 }
 
@@ -2739,7 +2845,7 @@ $btnIniciar.Add_Click({
     }
     $Global:Rodando = $true; $Global:Cancelar = $false
     Set-BotoesAcao $false; $btnPasta.Enabled = $false
-    $Global:Cfg.TesteDisco = $chkDisco.Checked; $Global:Cfg.BuscarWU = $chkWU.Checked; $Global:Cfg.Winget = $chkWinget.Checked; $Global:Cfg.TesteSom = $chkSom.Checked
+    $Global:Cfg.TesteDisco = $chkDisco.Checked; $Global:Cfg.TesteMemoria = $chkMemoria.Checked; $Global:Cfg.BuscarWU = $chkWU.Checked; $Global:Cfg.Winget = $chkWinget.Checked; $Global:Cfg.TesteSom = $chkSom.Checked
     $Global:Resultados.Clear(); $Global:Prints.Clear(); $txtLog.Clear(); $dgv.Rows.Clear()
     if (-not $manter) { $Global:Acoes.Clear(); $Global:Lotes.Clear(); $Global:LogGeral.Clear() }
     foreach ($it in $lv.Items) { $it.SubItems[1].Text = $(if ($sel.Id -contains $it.Tag) { 'Aguardando' } else { 'Não executado' }); $it.SubItems[2].Text = ''; $it.SubItems[3].Text = ''; $it.BackColor = [Drawing.Color]::White }

@@ -11,6 +11,8 @@ COMO USAR
   4. Ajuste as margens (mm) para o texto não ficar em cima do cabeçalho
      e do rodapé do timbrado (padrão: topo 40, rodapé 28, lados 18).
   5. Clique em INICIAR AUDITORIA e acompanhe cada teste.
+       (o teste de RAM e o de velocidade do disco podem ser desmarcados
+        nas Opções, se quiser uma auditoria mais rápida)
   6. No teste de Áudio ele toca dois bipes e pergunta se você ouviu.
   7. No teste de Serviços ele só desativa o que você marcar e confirmar.
   8. No final, use os botões do topo, se precisar:

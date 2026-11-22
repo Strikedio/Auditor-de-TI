@@ -41,6 +41,10 @@ jobs:
           $v = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings' -ErrorAction SilentlyContinue).TaskbarEndTask
           Write-Host "TaskbarEndTask apos otimizar: $v"
           if ($v -ne 1) { Write-Host 'Otimizacao nao aplicou TaskbarEndTask'; exit 1 }
+          $ev = Get-ChildItem $saida -Recurse -Filter evidencias.json | Select-Object -First 1
+          $txt = Get-Content $ev.FullName -Raw
+          if ($txt -notmatch 'Teste de integridade da RAM') { Write-Host 'Teste de RAM nao foi executado'; exit 1 }
+          if ($txt -match '([0-9]+) erro\(s\) em') { Write-Host "Teste de RAM: $($matches[1]) erro(s)" }
 
       - name: Testar o script de desfazer
         timeout-minutes: 5

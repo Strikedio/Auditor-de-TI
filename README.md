@@ -26,8 +26,8 @@ Ele baixa a versão mais recente para a pasta temporária e abre o programa (con
 | Área | Principais verificações |
 |---|---|
 | Sistema e hardware | Versão e fim de suporte do Windows, ativação, BIOS, TPM, Secure Boot, BitLocker, pontos de restauração, drivers com erro |
-| Memória | Quantidade, uso, slots livres, tipo/velocidade, processos que mais consomem |
-| Discos | SSD/HDD, saúde SMART, temperatura, desgaste, espaço livre, velocidade de leitura/escrita |
+| Memória | Quantidade, uso, slots livres, tipo/velocidade, processos que mais consomem e **teste de integridade da RAM** (padrões de memória, estilo MemTest, na memória livre) |
+| Discos | SSD/HDD, saúde e **atributos S.M.A.R.T. detalhados** (estilo CrystalDiskInfo: setores realocados/pendentes, temperatura, horas ligado, erros CRC), espaço livre, velocidade de leitura/escrita |
 | Processador | Carga em repouso, benchmark, programas na inicialização, bateria |
 | Rede | IP/DNS, internet, portas abertas e processos, SMBv1, compartilhamentos, Wi-Fi |
 | Áudio | Dispositivos, serviços e teste audível |
