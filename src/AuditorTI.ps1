@@ -30,7 +30,7 @@ trap {
     $msg = "Erro inesperado no AuditorTI:`r`n`r`n$($_.Exception.Message)`r`n`r`nLinha $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line)"
     try { Add-Content -Path (Join-Path $env:TEMP 'AuditorTI_erro.log') -Value ("[{0}] {1}" -f (Get-Date), $msg) } catch {}
     if (-not $SemInterface) { [System.Windows.Forms.MessageBox]::Show($msg, 'AuditorTI', 'OK', 'Error') | Out-Null }
-    else { [Console]::Error.WriteLine($msg) }
+    else { [Console]::Error.WriteLine($msg); exit 2 }
     continue
 }
 
@@ -1464,7 +1464,7 @@ function ConvertTo-TabelaHtml($linhas, [int]$max = 30) {
 
 function New-RelatorioHtml($Info, $Notas, [string]$HashEvid, $HashesPrints) {
     $sb = New-Object System.Text.StringBuilder
-    $A = { param($t) [void]$sb.Append($t) }
+    $Wr = { param($t) [void]$sb.Append($t) }
     $topo = [int]$Info.MargemTopo; $base = [int]$Info.MargemBase; $lado = [int]$Info.MargemLado
     if (-not $Info.Timbrado) { $topo = [math]::Max(12, [math]::Min($topo, 15)); $base = [math]::Max(12, [math]::Min($base, 15)) }
     $todos = Get-TodosAchados
@@ -1473,7 +1473,7 @@ function New-RelatorioHtml($Info, $Notas, [string]$HashEvid, $HashesPrints) {
     if (-not $res) { $res = @{ Computador = $env:COMPUTERNAME; Modelo = '-'; Serie = '-'; SO = '-'; CPU = '-'; RAM = '-' } }
     $dur = $Global:Fim - $Global:Inicio
 
-    & $A @"
+    & $Wr @"
 <!DOCTYPE html>
 <html lang="pt-BR"><head><meta charset="utf-8">
 <title>Relatório de Auditoria - $(Esc $Info.Cliente) - $(Esc $res.Computador)</title>
@@ -1535,121 +1535,121 @@ ul { margin: 1mm 0 2mm 5mm; padding-left: 3mm; } li { margin-bottom: 1mm; }
         $ext = [IO.Path]::GetExtension($Info.Timbrado).ToLower()
         $mime = if ($ext -eq '.png') { 'image/png' } else { 'image/jpeg' }
         $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($Info.Timbrado))
-        & $A "<div class='timbrado'><img src='data:$mime;base64,$b64' alt=''></div>"
+        & $Wr "<div class='timbrado'><img src='data:$mime;base64,$b64' alt=''></div>"
     }
-    & $A "<table class='pagina'><thead><tr><td><div class='esp-topo'></div></td></tr></thead><tfoot><tr><td><div class='esp-base'></div></td></tr></tfoot><tbody><tr><td class='conteudo'>"
+    & $Wr "<table class='pagina'><thead><tr><td><div class='esp-topo'></div></td></tr></thead><tfoot><tr><td><div class='esp-base'></div></td></tr></tfoot><tbody><tr><td class='conteudo'>"
 
     # ---------- Capa / identificação ----------
-    & $A "<h1>RELATÓRIO DE AUDITORIA TÉCNICA</h1><div class='sub'>Estação de trabalho Windows — diagnóstico de desempenho e segurança</div>"
-    & $A "<div class='ident'>"
-    & $A "<div><b>Cliente:</b> $(Esc $Info.Cliente)</div><div><b>Nº OS / chamado:</b> $(Esc $Info.OS)</div>"
-    & $A "<div><b>Técnico responsável:</b> $(Esc $Info.Tecnico)</div><div><b>ID do relatório:</b> $(Esc $Global:IdAud)</div>"
-    & $A "<div><b>Início:</b> $($Global:Inicio.ToString('dd/MM/yyyy HH:mm:ss'))</div><div><b>Término:</b> $($Global:Fim.ToString('dd/MM/yyyy HH:mm:ss')) ($([int]$dur.TotalMinutes) min $($dur.Seconds) s)</div>"
-    & $A "<div><b>Computador:</b> $(Esc $res.Computador)</div><div><b>Equipamento:</b> $(Esc $res.Modelo)</div>"
-    & $A "<div><b>Nº de série:</b> $(Esc $res.Serie)</div><div><b>Sistema:</b> $(Esc $res.SO)</div>"
-    & $A "<div><b>Processador:</b> $(Esc $res.CPU)</div><div><b>Memória:</b> $(Esc $res.RAM)</div>"
-    & $A "</div>"
+    & $Wr "<h1>RELATÓRIO DE AUDITORIA TÉCNICA</h1><div class='sub'>Estação de trabalho Windows — diagnóstico de desempenho e segurança</div>"
+    & $Wr "<div class='ident'>"
+    & $Wr "<div><b>Cliente:</b> $(Esc $Info.Cliente)</div><div><b>Nº OS / chamado:</b> $(Esc $Info.OS)</div>"
+    & $Wr "<div><b>Técnico responsável:</b> $(Esc $Info.Tecnico)</div><div><b>ID do relatório:</b> $(Esc $Global:IdAud)</div>"
+    & $Wr "<div><b>Início:</b> $($Global:Inicio.ToString('dd/MM/yyyy HH:mm:ss'))</div><div><b>Término:</b> $($Global:Fim.ToString('dd/MM/yyyy HH:mm:ss')) ($([int]$dur.TotalMinutes) min $($dur.Seconds) s)</div>"
+    & $Wr "<div><b>Computador:</b> $(Esc $res.Computador)</div><div><b>Equipamento:</b> $(Esc $res.Modelo)</div>"
+    & $Wr "<div><b>Nº de série:</b> $(Esc $res.Serie)</div><div><b>Sistema:</b> $(Esc $res.SO)</div>"
+    & $Wr "<div><b>Processador:</b> $(Esc $res.CPU)</div><div><b>Memória:</b> $(Esc $res.RAM)</div>"
+    & $Wr "</div>"
 
     # ---------- Notas ----------
     $degD = [int]($Notas.Desempenho * 36); $degS = [int]($Notas.Seguranca * 36)
-    & $A "<h2>Avaliação geral</h2><div class='notas'>"
-    & $A "<div class='nota'><div class='dial' style='background: conic-gradient($($cD[1]) ${degD}deg, #e4e7eb 0)'><span>$(Format-Nota $Notas.Desempenho)</span></div><div><div class='tit'>Nota de desempenho</div><div class='conc' style='color:$($cD[1])'>$($cD[0])</div><div class='obs'>Escala de 0 a 10 — hardware, disco, memória, CPU e estabilidade</div></div></div>"
-    & $A "<div class='nota'><div class='dial' style='background: conic-gradient($($cS[1]) ${degS}deg, #e4e7eb 0)'><span>$(Format-Nota $Notas.Seguranca)</span></div><div><div class='tit'>Nota de segurança</div><div class='conc' style='color:$($cS[1])'>$($cS[0])</div><div class='obs'>Escala de 0 a 10 — atualizações, antivírus, firewall, contas e configurações</div></div></div>"
-    & $A "</div>"
+    & $Wr "<h2>Avaliação geral</h2><div class='notas'>"
+    & $Wr "<div class='nota'><div class='dial' style='background: conic-gradient($($cD[1]) ${degD}deg, #e4e7eb 0)'><span>$(Format-Nota $Notas.Desempenho)</span></div><div><div class='tit'>Nota de desempenho</div><div class='conc' style='color:$($cD[1])'>$($cD[0])</div><div class='obs'>Escala de 0 a 10 — hardware, disco, memória, CPU e estabilidade</div></div></div>"
+    & $Wr "<div class='nota'><div class='dial' style='background: conic-gradient($($cS[1]) ${degS}deg, #e4e7eb 0)'><span>$(Format-Nota $Notas.Seguranca)</span></div><div><div class='tit'>Nota de segurança</div><div class='conc' style='color:$($cS[1])'>$($cS[0])</div><div class='obs'>Escala de 0 a 10 — atualizações, antivírus, firewall, contas e configurações</div></div></div>"
+    & $Wr "</div>"
     $cnt = $Notas.Contagem
-    & $A "<div class='chips'><div class='chip critico'><b>$($cnt['Crítico'])</b>Crítico</div><div class='chip alto'><b>$($cnt['Alto'])</b>Alto</div><div class='chip medio'><b>$($cnt['Médio'])</b>Médio</div><div class='chip baixo'><b>$($cnt['Baixo'])</b>Baixo</div></div>"
+    & $Wr "<div class='chips'><div class='chip critico'><b>$($cnt['Crítico'])</b>Crítico</div><div class='chip alto'><b>$($cnt['Alto'])</b>Alto</div><div class='chip medio'><b>$($cnt['Médio'])</b>Médio</div><div class='chip baixo'><b>$($cnt['Baixo'])</b>Baixo</div></div>"
 
     # ---------- Resumo executivo ----------
     $nAreas = $Global:Resultados.Count
     $nVerif = 0; foreach ($k in $Global:Resultados.Keys) { $nVerif += $Global:Resultados[$k].Itens.Count }
-    & $A "<h2>Resumo executivo</h2>"
-    & $A "<p>Foram analisadas <b>$nAreas áreas</b> do equipamento, totalizando <b>$nVerif verificações</b> automatizadas. Foram identificados <b>$($cnt['Crítico']) ponto(s) crítico(s)</b>, $($cnt['Alto']) de severidade alta, $($cnt['Médio']) média e $($cnt['Baixo']) baixa. O equipamento obteve nota <b>$(Format-Nota $Notas.Desempenho)</b> em desempenho (<b>$($cD[0])</b>) e <b>$(Format-Nota $Notas.Seguranca)</b> em segurança (<b>$($cS[0])</b>).</p>"
+    & $Wr "<h2>Resumo executivo</h2>"
+    & $Wr "<p>Foram analisadas <b>$nAreas áreas</b> do equipamento, totalizando <b>$nVerif verificações</b> automatizadas. Foram identificados <b>$($cnt['Crítico']) ponto(s) crítico(s)</b>, $($cnt['Alto']) de severidade alta, $($cnt['Médio']) média e $($cnt['Baixo']) baixa. O equipamento obteve nota <b>$(Format-Nota $Notas.Desempenho)</b> em desempenho (<b>$($cD[0])</b>) e <b>$(Format-Nota $Notas.Seguranca)</b> em segurança (<b>$($cS[0])</b>).</p>"
     $prio = @($todos | Where-Object { $_.Severidade -in @('Crítico', 'Alto') } | Sort-Object @{e = { Get-RankSev $_.Severidade } }, Categoria)
     if ($prio.Count) {
-        & $A "<h3>Pontos que exigem atenção imediata</h3>"
-        foreach ($a in ($prio | Select-Object -First 10)) { & $A "<div class='achado $(Get-Classe $a.Severidade)'><span class='badge $(Get-Classe $a.Severidade)'>$(Esc $a.Severidade)</span> <b>$(Esc $a.Area):</b> $(Esc $a.Achado)<div class='rec'>&#10140; $(Esc $a.Recomendacao)</div></div>" }
+        & $Wr "<h3>Pontos que exigem atenção imediata</h3>"
+        foreach ($a in ($prio | Select-Object -First 10)) { & $Wr "<div class='achado $(Get-Classe $a.Severidade)'><span class='badge $(Get-Classe $a.Severidade)'>$(Esc $a.Severidade)</span> <b>$(Esc $a.Area):</b> $(Esc $a.Achado)<div class='rec'>&#10140; $(Esc $a.Recomendacao)</div></div>" }
     }
-    else { & $A "<p>Nenhum problema crítico ou de severidade alta foi encontrado.</p>" }
+    else { & $Wr "<p>Nenhum problema crítico ou de severidade alta foi encontrado.</p>" }
 
     # ---------- Melhorias e upgrades ----------
-    & $A "<h2>Melhorias e upgrades recomendados</h2>"
+    & $Wr "<h2>Melhorias e upgrades recomendados</h2>"
     $upg = @($todos | Where-Object { $_.Upgrade } | Sort-Object @{e = { Get-RankSev $_.Severidade } })
     if ($upg.Count) {
-        & $A "<h3>Upgrades de hardware / equipamento</h3><ul>"
-        foreach ($u in $upg) { & $A "<li><span class='badge $(Get-Classe $u.Severidade)'>$(Esc $u.Severidade)</span> <b>$(Esc $u.Achado)</b><br>$(Esc $u.Recomendacao)</li>" }
-        & $A "</ul>"
+        & $Wr "<h3>Upgrades de hardware / equipamento</h3><ul>"
+        foreach ($u in $upg) { & $Wr "<li><span class='badge $(Get-Classe $u.Severidade)'>$(Esc $u.Severidade)</span> <b>$(Esc $u.Achado)</b><br>$(Esc $u.Recomendacao)</li>" }
+        & $Wr "</ul>"
     }
-    else { & $A "<p>O hardware atende ao uso atual; nenhum upgrade é necessário no momento.</p>" }
+    else { & $Wr "<p>O hardware atende ao uso atual; nenhum upgrade é necessário no momento.</p>" }
     $vistos = @{}
     $plano = foreach ($a in ($todos | Where-Object { $_.Severidade -ne 'Info' -and -not $_.Upgrade } | Sort-Object @{e = { Get-RankSev $_.Severidade } })) {
         if ($vistos[$a.Recomendacao]) { continue }; $vistos[$a.Recomendacao] = 1
         $pz = switch ($a.Severidade) { 'Crítico' { 'Imediata' } 'Alto' { 'Alta (até 7 dias)' } 'Médio' { 'Média (até 30 dias)' } default { 'Baixa' } }
         [pscustomobject]@{ 'Prioridade' = $pz; 'Área' = $a.Area; 'Categoria' = $a.Categoria; 'Ação recomendada' = $a.Recomendacao }
     }
-    if (@($plano).Count) { & $A "<h3>Plano de ação priorizado</h3>"; & $A (ConvertTo-TabelaHtml $plano 60) }
+    if (@($plano).Count) { & $Wr "<h3>Plano de ação priorizado</h3>"; & $Wr (ConvertTo-TabelaHtml $plano 60) }
     $dicas = @($todos | Where-Object { $_.Severidade -eq 'Info' -and $_.Recomendacao -and -not $_.Upgrade })
-    if ($dicas.Count) { & $A "<h3>Sugestões adicionais</h3><ul>"; foreach ($d in $dicas) { & $A "<li>$(Esc $d.Achado) — $(Esc $d.Recomendacao)</li>" }; & $A "</ul>" }
+    if ($dicas.Count) { & $Wr "<h3>Sugestões adicionais</h3><ul>"; foreach ($d in $dicas) { & $Wr "<li>$(Esc $d.Achado) — $(Esc $d.Recomendacao)</li>" }; & $Wr "</ul>" }
 
     # ---------- Ações executadas ----------
     if ($Global:Acoes.Count) {
-        & $A "<h2>Ações executadas durante a auditoria</h2>"
-        & $A "<p>As alterações abaixo foram autorizadas pelo técnico durante a execução. O estado original foi registrado e o script <b>restaurar_servicos.ps1</b> (na pasta do relatório) desfaz as alterações.</p>"
-        & $A (ConvertTo-TabelaHtml ($Global:Acoes | Select-Object @{n = 'Data/hora'; e = { $_.Data.ToString('dd/MM/yyyy HH:mm:ss') } }, 'Ação', 'Serviço', 'Nome', 'Estado anterior', 'Resultado') 100)
+        & $Wr "<h2>Ações executadas durante a auditoria</h2>"
+        & $Wr "<p>As alterações abaixo foram autorizadas pelo técnico durante a execução. O estado original foi registrado e o script <b>restaurar_servicos.ps1</b> (na pasta do relatório) desfaz as alterações.</p>"
+        & $Wr (ConvertTo-TabelaHtml ($Global:Acoes | Select-Object @{n = 'Data/hora'; e = { $_.Data.ToString('dd/MM/yyyy HH:mm:ss') } }, 'Ação', 'Serviço', 'Nome', 'Estado anterior', 'Resultado') 100)
     }
 
     # ---------- Detalhamento ----------
-    & $A "<h2 class='quebra'>Detalhamento por área</h2>"
+    & $Wr "<h2 class='quebra'>Detalhamento por área</h2>"
     $nSec = 0; $nFig = 0
     foreach ($k in $Global:Resultados.Keys) {
         $r = $Global:Resultados[$k]; $nSec++
         $st = $r.Situacao
-        & $A "<div class='cab-teste'><h3>$nSec. $(Esc $r.Nome) <span class='badge $(Get-Classe $st)'>$(Esc $st)</span></h3><span class='meta'>duração: $([math]::Round($r.Duracao,0)) s</span></div>"
-        if ($r.Desc) { & $A "<p class='obs'>Escopo: $(Esc $r.Desc)</p>" }
+        & $Wr "<div class='cab-teste'><h3>$nSec. $(Esc $r.Nome) <span class='badge $(Get-Classe $st)'>$(Esc $st)</span></h3><span class='meta'>duração: $([math]::Round($r.Duracao,0)) s</span></div>"
+        if ($r.Desc) { & $Wr "<p class='obs'>Escopo: $(Esc $r.Desc)</p>" }
         if ($r.Itens.Count) {
-            & $A "<table class='dados'><thead><tr><th style='width:34%'>Verificação</th><th>Resultado</th><th style='width:16mm'>Situação</th></tr></thead><tbody>"
-            foreach ($i in $r.Itens) { & $A "<tr><td>$(Esc $i.Item)</td><td>$(Esc $i.Valor)</td><td><span class='badge $(Get-Classe $i.Status)'>$(Esc $i.Status)</span></td></tr>" }
-            & $A "</tbody></table>"
+            & $Wr "<table class='dados'><thead><tr><th style='width:34%'>Verificação</th><th>Resultado</th><th style='width:16mm'>Situação</th></tr></thead><tbody>"
+            foreach ($i in $r.Itens) { & $Wr "<tr><td>$(Esc $i.Item)</td><td>$(Esc $i.Valor)</td><td><span class='badge $(Get-Classe $i.Status)'>$(Esc $i.Status)</span></td></tr>" }
+            & $Wr "</tbody></table>"
         }
         foreach ($a in ($r.Achados | Sort-Object @{e = { Get-RankSev $_.Severidade } })) {
-            & $A "<div class='achado $(Get-Classe $a.Severidade)'><span class='badge $(Get-Classe $a.Severidade)'>$(Esc $a.Severidade)</span> <span class='obs'>[$(Esc $a.Categoria)$(if ($a.Penalidade -gt 0) { ' | -' + (Format-Nota $a.Penalidade) + ' pt' })]</span> $(Esc $a.Achado)<div class='rec'>&#10140; $(Esc $a.Recomendacao)</div></div>"
+            & $Wr "<div class='achado $(Get-Classe $a.Severidade)'><span class='badge $(Get-Classe $a.Severidade)'>$(Esc $a.Severidade)</span> <span class='obs'>[$(Esc $a.Categoria)$(if ($a.Penalidade -gt 0) { ' | -' + (Format-Nota $a.Penalidade) + ' pt' })]</span> $(Esc $a.Achado)<div class='rec'>&#10140; $(Esc $a.Recomendacao)</div></div>"
         }
-        foreach ($t in $r.Tabelas) { & $A "<h3 style='font-size:9.5pt'>$(Esc $t.Titulo)</h3>"; & $A (ConvertTo-TabelaHtml $t.Linhas 30) }
+        foreach ($t in $r.Tabelas) { & $Wr "<h3 style='font-size:9.5pt'>$(Esc $t.Titulo)</h3>"; & $Wr (ConvertTo-TabelaHtml $t.Linhas 30) }
         if ($Global:Prints.ContainsKey($k)) {
             $nFig++
             $b64 = [Convert]::ToBase64String($Global:Prints[$k])
-            & $A "<div class='fig'><img src='data:image/jpeg;base64,$b64' alt=''><div class='leg'>Figura $nFig — Tela do AuditorTI ao concluir o teste &ldquo;$(Esc $r.Nome)&rdquo; ($($r.Fim.ToString('dd/MM/yyyy HH:mm:ss')))</div></div>"
+            & $Wr "<div class='fig'><img src='data:image/jpeg;base64,$b64' alt=''><div class='leg'>Figura $nFig — Tela do AuditorTI ao concluir o teste &ldquo;$(Esc $r.Nome)&rdquo; ($($r.Fim.ToString('dd/MM/yyyy HH:mm:ss')))</div></div>"
         }
     }
     $naoExec = @($Global:Testes | Where-Object { -not $Global:Resultados.Contains($_.Id) })
-    if ($naoExec.Count) { & $A "<p class='obs'>Testes não executados nesta auditoria: $(Esc (($naoExec | ForEach-Object { $_.Nome }) -join ', ')). As notas consideram apenas as áreas analisadas.</p>" }
+    if ($naoExec.Count) { & $Wr "<p class='obs'>Testes não executados nesta auditoria: $(Esc (($naoExec | ForEach-Object { $_.Nome }) -join ', ')). As notas consideram apenas as áreas analisadas.</p>" }
 
     # ---------- Lista completa de achados ----------
-    & $A "<h2 class='quebra'>Anexo A — Lista completa de achados</h2>"
+    & $Wr "<h2 class='quebra'>Anexo A — Lista completa de achados</h2>"
     $n = 0
     $lista = foreach ($a in ($todos | Sort-Object @{e = { Get-RankSev $_.Severidade } }, Categoria)) { $n++; [pscustomobject]@{ '#' = $n; 'Severidade' = $a.Severidade; 'Categoria' = $a.Categoria; 'Área' = $a.Area; 'Achado' = $a.Achado; 'Desconto' = $(if ($a.Penalidade -gt 0) { '-' + (Format-Nota $a.Penalidade) } else { '0' }) } }
-    if ($n) { & $A (ConvertTo-TabelaHtml $lista 500) } else { & $A "<p>Nenhum achado.</p>" }
+    if ($n) { & $Wr (ConvertTo-TabelaHtml $lista 500) } else { & $Wr "<p>Nenhum achado.</p>" }
 
     # ---------- Metodologia ----------
-    & $A "<h2>Anexo B — Metodologia e critérios de pontuação</h2>"
-    & $A "<p>A auditoria foi realizada pelo software AuditorTI $Global:VersaoApp, executado localmente com privilégios de administrador, consultando diretamente as interfaces do Windows (WMI/CIM, Registro, Windows Update Agent, Microsoft Defender, Firewall do Windows, Agendador de Tarefas e Logs de Eventos). Nenhum dado foi enviado para a internet.</p>"
-    & $A "<p>Cada área começa com nota 10. Cada achado desconta pontos conforme a severidade (Segurança: Crítico −2,5 | Alto −1,2 | Médio −0,5 | Baixo −0,15; Desempenho: desconto específico indicado em cada achado). Havendo qualquer achado Crítico, a nota da categoria é limitada a 5,0. Descontos totais: desempenho −$(Format-Nota $Notas.PenD) / segurança −$(Format-Nota $Notas.PenS).</p>"
-    & $A "<p><b>Conceitos:</b> 9,0–10 Excelente · 7,0–8,9 Bom · 5,0–6,9 Regular · 3,0–4,9 Ruim · abaixo de 3,0 Crítico.</p>"
+    & $Wr "<h2>Anexo B — Metodologia e critérios de pontuação</h2>"
+    & $Wr "<p>A auditoria foi realizada pelo software AuditorTI $Global:VersaoApp, executado localmente com privilégios de administrador, consultando diretamente as interfaces do Windows (WMI/CIM, Registro, Windows Update Agent, Microsoft Defender, Firewall do Windows, Agendador de Tarefas e Logs de Eventos). Nenhum dado foi enviado para a internet.</p>"
+    & $Wr "<p>Cada área começa com nota 10. Cada achado desconta pontos conforme a severidade (Segurança: Crítico −2,5 | Alto −1,2 | Médio −0,5 | Baixo −0,15; Desempenho: desconto específico indicado em cada achado). Havendo qualquer achado Crítico, a nota da categoria é limitada a 5,0. Descontos totais: desempenho −$(Format-Nota $Notas.PenD) / segurança −$(Format-Nota $Notas.PenS).</p>"
+    & $Wr "<p><b>Conceitos:</b> 9,0–10 Excelente · 7,0–8,9 Bom · 5,0–6,9 Regular · 3,0–4,9 Ruim · abaixo de 3,0 Crítico.</p>"
     $met = foreach ($t in $Global:Testes) { [pscustomobject]@{ 'Área' = $t.Nome; 'O que é verificado' = $t.Desc; 'Executado' = SimNao ($Global:Resultados.Contains($t.Id)) } }
-    & $A (ConvertTo-TabelaHtml $met 50)
+    & $Wr (ConvertTo-TabelaHtml $met 50)
 
     # ---------- Integridade ----------
-    & $A "<h2>Anexo C — Integridade e rastreabilidade</h2>"
-    & $A "<p>Os dados brutos coletados foram gravados no arquivo <b>evidencias.json</b>, entregue junto com este relatório. Qualquer alteração nesse arquivo muda o código de verificação (hash SHA-256) abaixo, permitindo comprovar a autenticidade das informações.</p>"
-    & $A "<div class='ident'><div><b>ID do relatório:</b> $(Esc $Global:IdAud)</div><div><b>Versão do software:</b> AuditorTI $Global:VersaoApp</div><div><b>Executado por:</b> $(Esc ([Security.Principal.WindowsIdentity]::GetCurrent().Name))</div><div><b>Computador:</b> $(Esc $env:COMPUTERNAME)</div></div>"
-    & $A "<p><b>SHA-256 de evidencias.json:</b><br><span class='mono'>$HashEvid</span></p>"
-    if ($HashesPrints -and @($HashesPrints).Count) { & $A "<h3>Hash das capturas de tela</h3>"; & $A (ConvertTo-TabelaHtml $HashesPrints 50) }
+    & $Wr "<h2>Anexo C — Integridade e rastreabilidade</h2>"
+    & $Wr "<p>Os dados brutos coletados foram gravados no arquivo <b>evidencias.json</b>, entregue junto com este relatório. Qualquer alteração nesse arquivo muda o código de verificação (hash SHA-256) abaixo, permitindo comprovar a autenticidade das informações.</p>"
+    & $Wr "<div class='ident'><div><b>ID do relatório:</b> $(Esc $Global:IdAud)</div><div><b>Versão do software:</b> AuditorTI $Global:VersaoApp</div><div><b>Executado por:</b> $(Esc ([Security.Principal.WindowsIdentity]::GetCurrent().Name))</div><div><b>Computador:</b> $(Esc $env:COMPUTERNAME)</div></div>"
+    & $Wr "<p><b>SHA-256 de evidencias.json:</b><br><span class='mono'>$HashEvid</span></p>"
+    if ($HashesPrints -and @($HashesPrints).Count) { & $Wr "<h3>Hash das capturas de tela</h3>"; & $Wr (ConvertTo-TabelaHtml $HashesPrints 50) }
     $ult = @($Global:LogGeral | Select-Object -Last 120)
-    & $A "<h3>Registro de execução (últimas $($ult.Count) linhas)</h3><div class='log'>$(Esc ($ult -join "`n"))</div>"
+    & $Wr "<h3>Registro de execução (últimas $($ult.Count) linhas)</h3><div class='log'>$(Esc ($ult -join "`n"))</div>"
 
     # ---------- Assinaturas ----------
-    & $A "<div class='assin'><div>$(Esc $Info.Tecnico)<br>Técnico responsável</div><div>$(Esc $Info.Cliente)<br>Cliente / responsável pelo equipamento</div></div>"
-    & $A "<p class='obs' style='text-align:center;margin-top:4mm'>Relatório gerado automaticamente em $((Get-Date).ToString('dd/MM/yyyy HH:mm')) — $(Esc $Global:IdAud)</p>"
-    & $A "</td></tr></tbody></table></body></html>"
+    & $Wr "<div class='assin'><div>$(Esc $Info.Tecnico)<br>Técnico responsável</div><div>$(Esc $Info.Cliente)<br>Cliente / responsável pelo equipamento</div></div>"
+    & $Wr "<p class='obs' style='text-align:center;margin-top:4mm'>Relatório gerado automaticamente em $((Get-Date).ToString('dd/MM/yyyy HH:mm')) — $(Esc $Global:IdAud)</p>"
+    & $Wr "</td></tr></tbody></table></body></html>"
     return $sb.ToString()
 }
 
