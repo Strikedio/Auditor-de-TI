@@ -19,10 +19,10 @@ jobs:
         shell: powershell
         run: |
           $falhou = $false
-          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+          foreach ($f in Get-ChildItem -Recurse -Filter *.ps1) {
             $erros = $null
-            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$erros)
-            foreach ($e in $erros) { Write-Host "ERRO $($_.Name) linha $($e.Extent.StartLineNumber): $($e.Message)"; $falhou = $true }
+            [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$erros)
+            foreach ($e in $erros) { Write-Host "ERRO $($f.Name) linha $($e.Extent.StartLineNumber): $($e.Message)"; $falhou = $true }
           }
           if ($falhou) { exit 1 } else { Write-Host 'Sintaxe OK' }
 

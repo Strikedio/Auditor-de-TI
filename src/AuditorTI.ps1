@@ -278,7 +278,7 @@ $Global:Testes = @(
                 if ($data -lt (Get-Date)) {
                     Add-Item $R 'Suporte Microsoft' "ENCERRADO em $txtData" 'Crítico'
                     if ($build -lt 22000) {
-                        Add-Achado $R 'Segurança' 'Crítico' "Windows 10 sem suporte desde $txtData: não recebe mais correções de segurança (salvo se inscrito no programa ESU)." 'Migrar para o Windows 11 (se o hardware for compatível) ou inscrever no ESU. Se o hardware não for compatível, planejar a substituição do equipamento.' -Upgrade
+                        Add-Achado $R 'Segurança' 'Crítico' "Windows 10 sem suporte desde ${txtData}: não recebe mais correções de segurança (salvo se inscrito no programa ESU)." 'Migrar para o Windows 11 (se o hardware for compatível) ou inscrever no ESU. Se o hardware não for compatível, planejar a substituição do equipamento.' -Upgrade
                     }
                     else {
                         Add-Achado $R 'Segurança' 'Alto' "A versão $disp do Windows 11 está sem suporte desde $txtData." 'Atualizar para a versão mais recente do Windows 11 pelo Windows Update.'
