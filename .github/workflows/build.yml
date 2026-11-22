@@ -1,4 +1,4 @@
-name: Gerar executavel e instalador
+name: Verificar, gerar executavel e instalador
 
 on:
   push:
@@ -15,6 +15,33 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Verificar sintaxe dos scripts
+        shell: powershell
+        run: |
+          $falhou = $false
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $erros = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$erros)
+            foreach ($e in $erros) { Write-Host "ERRO $($_.Name) linha $($e.Extent.StartLineNumber): $($e.Message)"; $falhou = $true }
+          }
+          if ($falhou) { exit 1 } else { Write-Host 'Sintaxe OK' }
+
+      - name: Executar auditoria completa sem interface (teste real)
+        shell: powershell
+        run: |
+          $saida = Join-Path $env:GITHUB_WORKSPACE 'teste-saida'
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\AuditorTI.ps1 -SemInterface -Cliente 'Teste GitHub' -Tecnico 'Verificacao automatica' -Timbrado .\exemplos\timbrado-exemplo.png -Saida $saida
+          Write-Host "Codigo de saida: $LASTEXITCODE"
+          if (-not (Get-ChildItem $saida -Recurse -Filter *.pdf)) { Write-Host 'PDF nao foi gerado'; exit 1 }
+
+      - name: Testar a janela do programa
+        shell: powershell
+        run: |
+          $saida = Join-Path $env:GITHUB_WORKSPACE 'teste-saida'
+          $p = Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File .\src\AuditorTI.ps1 -TestarInterface -Saida `"$saida\script`"" -PassThru
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); Write-Host 'A janela nao fechou sozinha'; exit 1 }
+          if (-not (Test-Path "$saida\script\interface.jpg")) { Write-Host 'Print da interface nao gerado'; Get-Content "$env:TEMP\AuditorTI_erro.log" -ErrorAction SilentlyContinue; exit 1 }
+
       - name: Instalar Inno Setup
         shell: pwsh
         run: |
@@ -26,6 +53,22 @@ jobs:
           $v = ''
           if ($env:GITHUB_REF_TYPE -eq 'tag') { $v = $env:GITHUB_REF_NAME }
           .\build\Compilar.ps1 -Versao $v
+
+      - name: Testar o AuditorTI.exe compilado
+        shell: powershell
+        run: |
+          $saida = Join-Path $env:GITHUB_WORKSPACE 'teste-saida\exe'
+          $p = Start-Process .\dist\AuditorTI.exe -ArgumentList "-TestarInterface -Saida `"$saida`"" -PassThru
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); Write-Host 'O exe nao fechou sozinho'; exit 1 }
+          if (-not (Test-Path "$saida\interface.jpg")) { Write-Host 'O exe nao abriu a janela'; Get-Content "$env:TEMP\AuditorTI_erro.log" -ErrorAction SilentlyContinue; exit 1 }
+          Write-Host 'AuditorTI.exe abriu corretamente'
+
+      - name: Guardar resultado do teste
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: teste-auditoria
+          path: teste-saida
 
       - name: Guardar arquivos gerados
         uses: actions/upload-artifact@v4

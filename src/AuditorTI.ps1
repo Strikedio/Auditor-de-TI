@@ -8,14 +8,31 @@
      Compilação .: veja Compilar-EXE.ps1 (gera AuditorTI.exe com ps2exe)
     =====================================================================
 #>
+param(
+    [switch]$SemInterface,      # executa todos os testes sem janela e gera o relatório
+    [switch]$TestarInterface,   # abre a janela, salva um print e fecha (verificação)
+    [string]$Cliente = 'Teste automatizado',
+    [string]$Tecnico = '',
+    [string]$Timbrado = '',
+    [string]$Saida = ''
+)
 
-$Global:VersaoApp = '1.1.0'
+$Global:VersaoApp = '1.1.1'
 $ErrorActionPreference = 'Continue'
 try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop } catch {}
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+
+# Qualquer erro grave é mostrado na tela e gravado em %TEMP%\AuditorTI_erro.log
+trap {
+    $msg = "Erro inesperado no AuditorTI:`r`n`r`n$($_.Exception.Message)`r`n`r`nLinha $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line)"
+    try { Add-Content -Path (Join-Path $env:TEMP 'AuditorTI_erro.log') -Value ("[{0}] {1}" -f (Get-Date), $msg) } catch {}
+    if (-not $SemInterface) { [System.Windows.Forms.MessageBox]::Show($msg, 'AuditorTI', 'OK', 'Error') | Out-Null }
+    else { [Console]::Error.WriteLine($msg) }
+    continue
+}
 
 # ---------------------------------------------------------------------
 # Exige privilégio de Administrador
@@ -1597,7 +1614,7 @@ ul { margin: 1mm 0 2mm 5mm; padding-left: 3mm; } li { margin-bottom: 1mm; }
         if ($Global:Prints.ContainsKey($k)) {
             $nFig++
             $b64 = [Convert]::ToBase64String($Global:Prints[$k])
-            & $A "<div class='fig'><img src='data:image/jpeg;base64,$b64' alt=''><div class='leg'>Figura $nFig — Tela do AuditorTI ao concluir o teste “$(H $r.Nome)” ($($r.Fim.ToString('dd/MM/yyyy HH:mm:ss')))</div></div>"
+            & $A "<div class='fig'><img src='data:image/jpeg;base64,$b64' alt=''><div class='leg'>Figura $nFig — Tela do AuditorTI ao concluir o teste &ldquo;$(H $r.Nome)&rdquo; ($($r.Fim.ToString('dd/MM/yyyy HH:mm:ss')))</div></div>"
         }
     }
     $naoExec = @($Global:Testes | Where-Object { -not $Global:Resultados.Contains($_.Id) })
@@ -1726,7 +1743,7 @@ function Get-CorSituacao([string]$s) {
 function Update-Log {
     $m = $null
     while ($Global:Sync.Log.TryDequeue([ref]$m)) {
-        $txtLog.AppendText($m + [Environment]::NewLine)
+        if ($txtLog) { $txtLog.AppendText($m + [Environment]::NewLine) } else { [Console]::WriteLine($m) }
         [void]$Global:LogGeral.Add($m)
     }
 }
@@ -1748,7 +1765,7 @@ function Invoke-Teste($t, $item) {
     $estourou = $false
     while (-not $h.IsCompleted) {
         Update-Log
-        $item.SubItems[2].Text = ('{0:N0} s' -f $sw.Elapsed.TotalSeconds)
+        if ($item) { $item.SubItems[2].Text = ('{0:N0} s' -f $sw.Elapsed.TotalSeconds) }
         [System.Windows.Forms.Application]::DoEvents()
         Start-Sleep -Milliseconds 60
         if ($Global:Cancelar) { break }
@@ -1897,6 +1914,37 @@ function Set-Timbrado([string]$origem) {
     $Global:Timbrado = $dest
     $lblTimbrado.Text = [IO.Path]::GetFileName($origem)
     Save-Config
+}
+
+# ---------------------------------------------------------------------
+# Modo sem interface (linha de comando / verificação automática)
+#   AuditorTI.ps1 -SemInterface -Cliente "Nome" [-Timbrado arquivo.png] [-Saida pasta]
+# ---------------------------------------------------------------------
+if ($SemInterface) {
+    $Global:Cfg.TesteDisco = $true; $Global:Cfg.BuscarWU = $false; $Global:Cfg.Winget = $true; $Global:Cfg.TesteSom = $false
+    if ($Saida) { $Global:PastaRelatorios = $Saida }
+    $Global:Inicio = Get-Date
+    $Global:IdAud = 'AUD-{0}-{1}' -f $Global:Inicio.ToString('yyyyMMdd-HHmm'), ([guid]::NewGuid().ToString('N').Substring(0, 4).ToUpper())
+    $falhas = 0
+    foreach ($t in $Global:Testes) {
+        Write-LogUI "=== $($t.Nome) ==="
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $res = Invoke-Teste $t $null
+        $sw.Stop()
+        $res.Nome = $t.Nome; $res.Id = $t.Id; $res.Desc = $t.Desc; $res.Duracao = $sw.Elapsed.TotalSeconds; $res.Fim = Get-Date
+        $res.Situacao = Get-Situacao $res
+        if ($res.Situacao -eq 'Erro' -or @($res.Itens | Where-Object { $_.Status -eq 'Erro' }).Count) { $falhas++ }
+        $Global:Resultados[$t.Id] = $res
+        Write-LogUI ("Concluído: {0} -> {1} | {2} verificações, {3} achados, {4:N0} s" -f $t.Nome, $res.Situacao, $res.Itens.Count, $res.Achados.Count, $res.Duracao)
+    }
+    $Global:Fim = Get-Date
+    $nt = Get-Notas
+    Write-LogUI ("NOTAS -> Desempenho: {0} | Segurança: {1}" -f (Format-Nota $nt.Desempenho), (Format-Nota $nt.Seguranca))
+    $tb = $null; if ($Timbrado -and (Test-Path $Timbrado)) { $tb = (Resolve-Path $Timbrado).Path }
+    $rel = New-Relatorio @{ Cliente = $Cliente; Tecnico = $Tecnico; OS = ''; Timbrado = $tb; MargemTopo = 40; MargemBase = 28; MargemLado = 18 }
+    Write-LogUI "Relatório: $($rel.Pasta)"
+    Write-LogUI ("PDF gerado: {0}" -f $(if ($rel.Pdf) { $rel.Pdf } else { 'NÃO' }))
+    if ($falhas -or -not $rel.Pdf) { exit 1 } else { exit 0 }
 }
 
 # ---------------------------------------------------------------------
@@ -2092,5 +2140,16 @@ $form.Add_FormClosing({
     }
 })
 
+if ($TestarInterface) {
+    # verificação automática: mostra a janela, salva um print e fecha
+    $form.Add_Shown({
+        $Global:Resultados['sistema'] = @{ Nome = 'Teste'; Itens = @([pscustomobject]@{ Item = 'Interface'; Valor = 'Janela criada com sucesso'; Status = 'OK' }); Achados = @(); Tabelas = @() }
+        Show-Resultado 'sistema'
+        $pasta = if ($Saida) { $Saida } else { $env:TEMP }
+        New-Item -ItemType Directory -Path $pasta -Force | Out-Null
+        [IO.File]::WriteAllBytes((Join-Path $pasta 'interface.jpg'), (Get-Print))
+        $form.Close()
+    })
+}
 [void]$form.ShowDialog()
 $form.Dispose()
