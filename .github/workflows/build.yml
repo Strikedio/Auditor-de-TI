@@ -27,6 +27,7 @@ jobs:
           if ($falhou) { exit 1 } else { Write-Host 'Sintaxe OK' }
 
       - name: Executar auditoria completa sem interface (teste real)
+        timeout-minutes: 25
         shell: powershell
         run: |
           $saida = Join-Path $env:GITHUB_WORKSPACE 'teste-saida'
@@ -35,6 +36,7 @@ jobs:
           if (-not (Get-ChildItem $saida -Recurse -Filter *.pdf)) { Write-Host 'PDF nao foi gerado'; exit 1 }
 
       - name: Testar a janela do programa
+        timeout-minutes: 5
         shell: powershell
         run: |
           $saida = Join-Path $env:GITHUB_WORKSPACE 'teste-saida'
