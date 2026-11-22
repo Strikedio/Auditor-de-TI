@@ -1,0 +1,43 @@
+﻿=====================================================================
+ AuditorTI - Auditoria técnica de estações Windows
+ https://github.com/Strikedio/Auditor-de-TI
+=====================================================================
+
+COMO USAR
+  1. Execute o AuditorTI.exe (ele pede permissão de Administrador).
+     Sem o .exe? Use o Executar.bat.
+  2. Preencha Cliente, Técnico e Nº da OS.
+  3. Selecione o papel timbrado (PNG, JPG ou PDF, tamanho A4). Ele fica salvo.
+  4. Ajuste as margens (mm) para o texto não ficar em cima do cabeçalho
+     e do rodapé do timbrado (padrão: topo 40, rodapé 28, lados 18).
+  5. Clique em INICIAR AUDITORIA e acompanhe cada teste.
+  6. No teste de Áudio ele toca dois bipes e pergunta se você ouviu.
+  7. No teste de Serviços ele só desativa o que você marcar e confirmar.
+  8. No final, gere o relatório em PDF.
+     Para mudar as margens, gere de novo com "Gerar relatório PDF",
+     sem refazer os testes.
+
+ONDE FICAM OS ARQUIVOS
+  Modo portátil (pendrive ou com portable.txt na pasta):
+     dados\        -> configurações e papel timbrado
+     Relatorios\   -> relatórios
+  Modo instalado:
+     %APPDATA%\AuditorTI  e  Documentos\AuditoriasTI
+
+  Cada relatório tem: PDF, relatorio.html, evidencias.json (dados brutos),
+  prints\ e restaurar_servicos.ps1 (se algum serviço foi desativado).
+
+SEM PENDRIVE? Abra o PowerShell e cole:
+  irm https://raw.githubusercontent.com/Strikedio/Auditor-de-TI/main/run.ps1 | iex
+
+AVISOS
+  - Alguns antivírus acusam o AuditorTI.exe como suspeito (falso positivo
+    comum em scripts empacotados). Se isso acontecer, use o Executar.bat.
+  - O PDF é gerado pelo Microsoft Edge (já vem no Windows 10/11). Se
+    falhar, o relatório abre no navegador: Ctrl+P > Salvar como PDF,
+    Margens = Nenhuma, "Gráficos de plano de fundo" ligado.
+
+NOTAS
+  Desempenho e Segurança começam em 10 e cada problema desconta pontos
+  conforme a gravidade. Um item CRÍTICO limita a nota a 5,0.
+  9-10 Excelente | 7-8,9 Bom | 5-6,9 Regular | 3-4,9 Ruim | <3 Crítico

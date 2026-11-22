@@ -1,0 +1,47 @@
+name: Gerar executavel e instalador
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup --no-progress -y }
+
+      - name: Compilar AuditorTI
+        shell: powershell
+        run: |
+          $v = ''
+          if ($env:GITHUB_REF_TYPE -eq 'tag') { $v = $env:GITHUB_REF_NAME }
+          .\build\Compilar.ps1 -Versao $v
+
+      - name: Guardar arquivos gerados
+        uses: actions/upload-artifact@v4
+        with:
+          name: AuditorTI
+          path: |
+            dist/AuditorTI.exe
+            dist/AuditorTI-Setup-*.exe
+            dist/AuditorTI-Portatil-*.zip
+
+      - name: Publicar versao (release)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/AuditorTI.exe
+            dist/AuditorTI-Setup-*.exe
+            dist/AuditorTI-Portatil-*.zip
+          generate_release_notes: true
