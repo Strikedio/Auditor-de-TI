@@ -33,7 +33,7 @@ jobs:
           $saida = Join-Path $env:GITHUB_WORKSPACE 'teste-saida'
           $otim = 'restauracao,atividade,consumidor,descoberta,wpbt,localizacao,servicos,telemetria,entrega,temp,fimtarefa'
           $corr = 'firewall,smb1,autorun,dns,temp,chkdsk,assinaturas'
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\AuditorTI.ps1 -SemInterface -Cliente 'Teste GitHub' -Tecnico 'Verificacao automatica' -Timbrado .\exemplos\timbrado-exemplo.png -Saida $saida -Otimizar $otim -Corrigir $corr
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\src\AuditorTI.ps1 -SemInterface -Cliente 'Teste GitHub' -Tecnico 'Verificacao automatica' -Timbrado .\exemplos\timbrado-exemplo.png -Saida $saida -Otimizar $otim -Corrigir $corr -Capturar
           Write-Host "Codigo de saida: $LASTEXITCODE"
           if (-not (Get-ChildItem $saida -Recurse -Filter *.pdf)) { Write-Host 'PDF nao foi gerado'; exit 1 }
           $desf = Get-ChildItem $saida -Recurse -Filter desfazer_alteracoes.ps1 | Select-Object -First 1
@@ -45,6 +45,9 @@ jobs:
           $txt = Get-Content $ev.FullName -Raw
           if ($txt -notmatch 'Teste de integridade da RAM') { Write-Host 'Teste de RAM nao foi executado'; exit 1 }
           if ($txt -notmatch 'Leitura do disco') { Write-Host 'Teste de leitura dos discos nao executou'; exit 1 }
+          if ($txt -notmatch 'Seguran') { Write-Host 'Teste de seguranca de rede nao executou'; exit 1 }
+          $pc = Get-ChildItem $saida -Recurse -Filter 'captura_rede.*' | Select-Object -First 1
+          if ($pc) { Write-Host "Captura de rede gerada: $($pc.Name) ($([math]::Round($pc.Length/1KB)) KB)" } else { Write-Host 'Aviso: captura de rede nao gerou arquivo (pode ocorrer em VM)' }
           if ($txt -match '([0-9]+) erro\(s\) em') { Write-Host "Teste de RAM: $($matches[1]) erro(s)" }
 
       - name: Testar o script de desfazer

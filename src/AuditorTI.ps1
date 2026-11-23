@@ -16,22 +16,27 @@ param(
     [string]$Timbrado = '',
     [string]$Saida = '',
     [string]$Otimizar = '',     # (sem interface) ids das otimizações ou 'todos'
-    [string]$Corrigir = ''      # (sem interface) ids dos reparos, separados por vírgula
+    [string]$Corrigir = '',     # (sem interface) ids dos reparos, separados por vírgula
+    [switch]$Capturar           # (sem interface) faz a captura de pacotes no teste de rede
 )
 
-$Global:VersaoApp = '1.4.0'
+$Global:VersaoApp = '1.5.0'
 $ErrorActionPreference = 'Continue'
 try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop } catch {}
 
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
+$Global:TemGUI = $true
+try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+    [System.Windows.Forms.Application]::EnableVisualStyles()
+}
+catch { $Global:TemGUI = $false }
 
 # Qualquer erro grave é mostrado na tela e gravado em %TEMP%\AuditorTI_erro.log
 trap {
     $msg = "Erro inesperado no AuditorTI:`r`n`r`n$($_.Exception.Message)`r`n`r`nLinha $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line)"
     try { Add-Content -Path (Join-Path $env:TEMP 'AuditorTI_erro.log') -Value ("[{0}] {1}" -f (Get-Date), $msg) } catch {}
-    if (-not $SemInterface) { [System.Windows.Forms.MessageBox]::Show($msg, 'AuditorTI', 'OK', 'Error') | Out-Null }
+    if (-not $SemInterface -and $Global:TemGUI) { [System.Windows.Forms.MessageBox]::Show($msg, 'AuditorTI', 'OK', 'Error') | Out-Null }
     else { [Console]::Error.WriteLine($msg); exit 2 }
     continue
 }
@@ -42,13 +47,31 @@ trap {
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     if ($PSCommandPath -and $PSCommandPath -like '*.ps1') {
-        Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`"" -Verb RunAs
+        $fwd = ''
+        foreach ($kv in $PSBoundParameters.GetEnumerator()) {
+            if ($kv.Value -is [switch]) { if ($kv.Value) { $fwd += " -$($kv.Key)" } }
+            else { $fwd += " -$($kv.Key) `"$($kv.Value)`"" }
+        }
+        $jan = if ($SemInterface) { 'Hidden' } else { 'Normal' }
+        try { Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle $jan -File `"$PSCommandPath`"$fwd" -Verb RunAs }
+        catch { [Console]::Error.WriteLine('Execute o AuditorTI como Administrador.') }
     }
-    else {
-        [System.Windows.Forms.MessageBox]::Show('Execute o AuditorTI como Administrador (clique com o botão direito > Executar como administrador).', 'AuditorTI', 'OK', 'Warning') | Out-Null
-    }
+    elseif ($Global:TemGUI) { [System.Windows.Forms.MessageBox]::Show('Execute o AuditorTI como Administrador (clique com o botão direito > Executar como administrador).', 'AuditorTI', 'OK', 'Warning') | Out-Null }
+    else { [Console]::Error.WriteLine('Execute o AuditorTI como Administrador.') }
     exit
 }
+
+# ---------------------------------------------------------------------
+# Detecção do sistema (cliente / servidor / Server Core) e compatibilidade
+# ---------------------------------------------------------------------
+$Global:SO = @{ Caption = ''; Build = 0; Server = $false; DC = $false; Core = $false; PSVer = $PSVersionTable.PSVersion.Major }
+try {
+    $osx = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop
+    $Global:SO.Caption = [string]$osx.Caption; $Global:SO.Build = [int]$osx.BuildNumber
+    $Global:SO.Server = ([int]$osx.ProductType -ne 1); $Global:SO.DC = ([int]$osx.ProductType -eq 2)
+    $it = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name InstallationType -ErrorAction SilentlyContinue).InstallationType
+    $Global:SO.Core = ([string]$it -match 'Core')
+} catch {}
 
 # ---------------------------------------------------------------------
 # Estado global
@@ -1554,6 +1577,168 @@ public static class AuditorBench {
     if ($nov.Count) { Add-Achado $R 'Segurança' 'Info' "$($nov.Count) conta(s) criada(s) nos últimos 30 dias." 'Confirmar com o cliente se as contas foram criadas por pessoas autorizadas.' 0 }
     $R
 }}
+
+# ---------------------------------------------------------------------
+@{ Id = 'redeseg'; Nome = 'Segurança de rede (avançado)'; Timeout = 900
+   Desc = 'Auditoria de segurança da rede: LLMNR/NBT-NS/mDNS (envenenamento/Responder), assinatura SMB, WPAD, túneis IPv6 (Teredo/ISATAP/6to4), roteamento, tabela ARP (spoofing), servidores DNS, descoberta de hosts na rede e captura opcional de pacotes (pktmon/Wireshark).'
+   Codigo = {
+    $R = New-R
+    $srv = $Cfg.SO -and $Cfg.SO.Server
+    Log 'Auditando a configuração de segurança da rede...'
+
+    # --- Perfil e adaptadores ---
+    $cfgs = @(Get-NetIPConfiguration -ErrorAction SilentlyContinue | Where-Object { $_.NetAdapter -and [string]$_.NetAdapter.Status -eq 'Up' })
+    Add-Item $R 'Interfaces de rede ativas' $cfgs.Count
+    $gws = @($cfgs | ForEach-Object { $_.IPv4DefaultGateway.NextHop } | Where-Object { $_ } | Sort-Object -Unique)
+    Add-Item $R 'Gateway(s) padrão' (($gws -join ', '))
+
+    # --- LLMNR ---
+    Log 'Verificando LLMNR, NetBIOS e mDNS (vetores de envenenamento)...'
+    $llmnr = Get-RegVal 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient' 'EnableMulticast'
+    if ($llmnr -eq 0) { Add-Item $R 'LLMNR' 'Desativado' 'OK' }
+    else {
+        Add-Item $R 'LLMNR (multicast DNS)' 'ATIVADO' 'Atenção'
+        Add-Achado $R 'Segurança' 'Alto' 'LLMNR ativado: permite ataques de envenenamento de nome (Responder) para roubo de credenciais na rede.' 'Desativar por GPO ou registro: HKLM\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient\EnableMulticast = 0.'
+    }
+
+    # --- NetBIOS over TCP/IP ---
+    $nbt = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=true' -ErrorAction SilentlyContinue)
+    $nbtOn = @($nbt | Where-Object { [int]$_.TcpipNetbiosOptions -ne 2 })
+    if ($nbtOn.Count) {
+        Add-Item $R 'NetBIOS over TCP/IP (NBT-NS)' ("Ativado em {0} adaptador(es)" -f $nbtOn.Count) 'Atenção'
+        Add-Achado $R 'Segurança' 'Alto' 'NetBIOS over TCP/IP (NBT-NS) ativado: outro vetor de envenenamento de nome (Responder) e vazamento de informação.' 'Desativar o NetBIOS over TCP/IP nas propriedades TCP/IPv4 de cada adaptador (ou via DHCP), deixando o DNS resolver os nomes.'
+    }
+    else { Add-Item $R 'NetBIOS over TCP/IP (NBT-NS)' 'Desativado' 'OK' }
+
+    # --- mDNS ---
+    $mdns = Get-RegVal 'HKLM:\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters' 'EnableMDNS'
+    if ($null -ne $mdns -and $mdns -eq 0) { Add-Item $R 'mDNS' 'Desativado' 'OK' }
+    else {
+        Add-Item $R 'mDNS (multicast DNS)' 'Ativado (padrão)' 'Info'
+        Add-Achado $R 'Segurança' 'Baixo' 'mDNS ativado: pode ser usado para descoberta/envenenamento em redes não confiáveis.' 'Em ambiente corporativo, avaliar desativar: HKLM\SYSTEM\CurrentControlSet\Services\Dnscache\Parameters\EnableMDNS = 0.' 0.15
+    }
+
+    # --- Assinatura SMB ---
+    Log 'Verificando assinatura SMB (proteção contra NTLM relay)...'
+    $smbS = Get-SmbServerConfiguration -ErrorAction SilentlyContinue
+    $smbC = Get-SmbClientConfiguration -ErrorAction SilentlyContinue
+    if ($smbS) {
+        Add-Item $R 'Assinatura SMB obrigatória (servidor)' (SimNao $smbS.RequireSecuritySignature) $(if ($smbS.RequireSecuritySignature) { 'OK' } else { 'Atenção' })
+        if (-not $smbS.RequireSecuritySignature) { Add-Achado $R 'Segurança' 'Médio' 'Servidor SMB não exige assinatura: facilita ataques de NTLM relay na rede.' 'Exigir assinatura SMB: Set-SmbServerConfiguration -RequireSecuritySignature $true (via GPO em domínio).' }
+    }
+    if ($smbC) { Add-Item $R 'Assinatura SMB obrigatória (cliente)' (SimNao $smbC.RequireSecuritySignature) $(if ($smbC.RequireSecuritySignature) { 'OK' } else { 'Info' }) }
+
+    # --- WPAD ---
+    $autoDet = Get-RegVal 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' 'AutoDetect'
+    $wpadSvc = Get-Service 'WinHttpAutoProxySvc' -ErrorAction SilentlyContinue
+    if ($autoDet -eq 1) {
+        Add-Item $R 'Detecção automática de proxy (WPAD)' 'ATIVADA' 'Atenção'
+        Add-Achado $R 'Segurança' 'Médio' 'Detecção automática de proxy (WPAD) ativada: permite sequestro de proxy e interceptação do tráfego web na rede.' 'Desmarcar "Detectar configurações automaticamente" nas opções de Internet e criar um registro WPAD interno, ou desativar o serviço WinHttpAutoProxySvc.'
+    }
+    else { Add-Item $R 'Detecção automática de proxy (WPAD)' 'Desativada' 'OK' }
+
+    # --- Roteamento IP ---
+    $ipr = Get-RegVal 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters' 'IPEnableRouter'
+    if ($ipr -eq 1) {
+        Add-Item $R 'Roteamento de IP (IP forwarding)' 'ATIVADO' $(if ($srv) { 'Atenção' } else { 'Crítico' })
+        Add-Achado $R 'Segurança' $(if ($srv) { 'Médio' } else { 'Alto' }) 'Encaminhamento de IP ativado: o computador roteia tráfego entre redes (pode indicar pivô de ataque ou configuração indevida).' 'Se não houver função de roteamento/RRAS prevista, definir IPEnableRouter = 0.'
+    }
+    else { Add-Item $R 'Roteamento de IP (IP forwarding)' 'Desativado' 'OK' }
+
+    # --- Túneis IPv6 ---
+    Log 'Verificando túneis IPv6 (Teredo, ISATAP, 6to4)...'
+    $ter = Invoke-Cmd "$env:windir\System32\netsh.exe" 'interface teredo show state' 15000
+    $isa = Invoke-Cmd "$env:windir\System32\netsh.exe" 'interface isatap show state' 15000
+    $s6 = Invoke-Cmd "$env:windir\System32\netsh.exe" 'interface 6to4 show state' 15000
+    $tun = @()
+    if ($ter -match '(?im)(type|tipo)\s*:\s*(enterpriseclient|client|default|automatic)' -and $ter -notmatch '(?im):\s*(disabled|desativad)') { $tun += 'Teredo' }
+    if ($isa -match '(?im):\s*(enabled|automatic|habilitad|automát)' -and $isa -notmatch '(?im):\s*(disabled|desativad)') { $tun += 'ISATAP' }
+    if ($s6 -match '(?im):\s*(enabled|automatic|habilitad|automát)' -and $s6 -notmatch '(?im):\s*(disabled|desativad)') { $tun += '6to4' }
+    if ($tun.Count) {
+        Add-Item $R 'Túneis IPv6 ativos' ($tun -join ', ') 'Atenção'
+        Add-Achado $R 'Segurança' 'Médio' ("Túnel(is) IPv6 ativo(s): {0}. Podem contornar controles de rede IPv4 e permitir mitm via RA falso." -f ($tun -join ', ')) 'Desativar os túneis não utilizados: netsh interface teredo set state disabled; netsh interface isatap set state disabled; netsh interface 6to4 set state disabled.'
+    }
+    else { Add-Item $R 'Túneis IPv6 (Teredo/ISATAP/6to4)' 'Nenhum ativo' 'OK' }
+
+    # --- Servidores DNS ---
+    Log 'Analisando servidores DNS...'
+    $dns = @(Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.ServerAddresses.Count } | Select-Object -ExpandProperty ServerAddresses | Sort-Object -Unique)
+    Add-Item $R 'Servidores DNS configurados' (($dns -join ', '))
+    $dnsPub = @('8.8.8.8', '8.8.4.4', '1.1.1.1', '1.0.0.1', '9.9.9.9', '208.67.222.222', '208.67.220.220', '4.2.2.2', '4.2.2.1')
+    $ext = @($dns | Where-Object { $_ -in $dnsPub })
+    if ($srv -and $Cfg.SO.DC -and $ext.Count) { Add-Achado $R 'Segurança' 'Médio' ("Controlador de domínio usando DNS público ({0})." -f ($ext -join ', ')) 'Um DC deve apontar para si mesmo/DNS interno; DNS público quebra a resolução do AD e expõe consultas.' }
+    try {
+        $doh = @(Get-DnsClientDohServerAddress -ErrorAction SilentlyContinue)
+        if ($doh.Count) { Add-Item $R 'DNS over HTTPS (DoH) configurado' ($doh.Count) 'Info' }
+    } catch {}
+
+    # --- Tabela ARP / vizinhança (spoofing e descoberta de hosts) ---
+    Log 'Lendo tabela ARP e descobrindo hosts na rede local...'
+    $neigh = @(Get-NetNeighbor -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { [string]$_.State -in @('Reachable', 'Stale', 'Permanent', 'Delay', 'Probe') -and $_.LinkLayerAddress -and $_.LinkLayerAddress -notmatch '^(00-00-00-00-00-00|FF-FF-FF-FF-FF-FF)$' -and $_.IPAddress -notmatch '^(224\.|239\.|255\.)' })
+    $hosts = @($neigh | Where-Object { $_.IPAddress -notmatch '\.255$' } | Select-Object @{n = 'IP'; e = { $_.IPAddress } }, @{n = 'MAC'; e = { $_.LinkLayerAddress } }, @{n = 'Estado'; e = { [string]$_.State } }, @{n = 'Interface'; e = { (Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue).Name } } | Sort-Object { [version](($_.IP -replace '[^\d.]', '')) } -ErrorAction SilentlyContinue)
+    if (-not $hosts.Count) {
+        $arp = Invoke-Cmd "$env:windir\System32\arp.exe" '-a' 20000
+        $hosts = @([regex]::Matches($arp, '(?m)^\s*(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F-]{11,17})\s+(\w+)') | ForEach-Object { [pscustomobject]@{ IP = $_.Groups[1].Value; MAC = ($_.Groups[2].Value -replace ':', '-').ToUpper(); Estado = $_.Groups[3].Value; Interface = '' } } | Where-Object { $_.MAC -notmatch '^FF-FF' -and $_.IP -notmatch '\.255$|^22[4-9]\.|^23\d\.' })
+    }
+    Add-Item $R 'Hosts vistos na rede local (ARP)' $hosts.Count
+    Add-Tabela $R 'Hosts na rede local (tabela ARP/vizinhança)' $hosts
+    # MAC duplicado em vários IPs = possível ARP spoofing (ou gateway redundante)
+    $dupMac = @($hosts | Group-Object MAC | Where-Object { $_.Count -gt 1 -and $_.Name -notmatch '^(00-00|FF-FF)' })
+    foreach ($d in $dupMac) {
+        $ips = @($d.Group | ForEach-Object { $_.IP })
+        $gwDup = @($ips | Where-Object { $_ -in $gws }).Count -gt 0
+        Add-Achado $R 'Segurança' $(if ($gwDup) { 'Alto' } else { 'Médio' }) ("MAC {0} responde por {1} IPs: {2}." -f $d.Name, $d.Count, ($ips -join ', ')) 'Possível ARP spoofing (envenenamento) na rede - um atacante pode estar interceptando o tráfego. Verificar o dispositivo com esse MAC. Se for gateway redundante/NIC teaming, é normal.'
+    }
+    if (-not $dupMac.Count) { Add-Item $R 'Indício de ARP spoofing' 'Nenhum (sem MAC duplicado)' 'OK' }
+
+    # --- Ferramentas de análise presentes ---
+    $tshark = (Get-Command tshark.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+    if (-not $tshark) { foreach ($c in @("$env:ProgramFiles\Wireshark\tshark.exe", "${env:ProgramFiles(x86)}\Wireshark\tshark.exe")) { if (Test-Path $c) { $tshark = $c; break } } }
+    $pktmon = (Get-Command pktmon.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source; if (-not $pktmon) { if (Test-Path "$env:windir\System32\pktmon.exe") { $pktmon = "$env:windir\System32\pktmon.exe" } }
+    Add-Item $R 'Wireshark/tshark instalado' $(if ($tshark) { 'Sim' } else { 'Não' }) 'Info'
+    Add-Item $R 'pktmon (captura nativa do Windows)' $(if ($pktmon) { 'Disponível' } else { 'Indisponível (Windows antigo)' }) 'Info'
+
+    # --- Captura de pacotes (opcional) ---
+    if ($Cfg.CapturaRede) {
+        $seg = [int]$Cfg.CapSeg; if ($seg -lt 10) { $seg = 45 }
+        if ($pktmon) {
+            Log ("Iniciando captura de pacotes com pktmon por {0} s..." -f $seg)
+            $dir = Join-Path $env:TEMP ('AuditorTI_cap_' + (Get-Date -Format 'yyyyMMddHHmmss'))
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            $etl = Join-Path $dir 'captura.etl'; $pcap = Join-Path $dir 'captura_rede.pcapng'
+            [void](Invoke-Cmd $pktmon 'stop' 20000)
+            [void](Invoke-Cmd $pktmon ('start --capture --pkt-size 256 --file-name "{0}"' -f $etl) 30000)
+            if ($UltimoCodigo -ne 0 -or -not (Test-Path $etl)) { [void](Invoke-Cmd $pktmon ('start --etw --pkt-size 256 --file-name "{0}"' -f $etl) 30000) }
+            Start-Sleep -Seconds $seg
+            [void](Invoke-Cmd $pktmon 'stop' 60000)
+            Log 'Convertendo a captura para o formato do Wireshark (pcapng)...'
+            [void](Invoke-Cmd $pktmon ('pcapng "{0}" -o "{1}"' -f $etl, $pcap) 180000)
+            if (-not (Test-Path $pcap)) { $alt = ($pcap -replace '\.pcapng$', '.pcap'); [void](Invoke-Cmd $pktmon ('etl2pcap "{0}" -o "{1}"' -f $etl, $alt) 180000); if (Test-Path $alt) { $pcap = $alt } }
+            if (Test-Path $pcap) {
+                $tam = [math]::Round((Get-Item $pcap).Length / 1MB, 2)
+                Add-Item $R 'Captura de pacotes' ("Concluída - {0} MB ({1} s) - arquivo para abrir no Wireshark" -f $tam, $seg) 'OK'
+                $R.Extra.Captura = $pcap
+                Add-Item $R 'Arquivo da captura' ('captura_rede' + [IO.Path]::GetExtension($pcap) + ' (salvo na pasta do relatório)') 'Info'
+            }
+            else { Add-Item $R 'Captura de pacotes' 'Capturado, mas não foi possível converter para pcapng (arquivo .etl na pasta temporária)' 'Atenção'; if (Test-Path $etl) { $R.Extra.Captura = $etl } }
+
+            # Análise com tshark, se disponível
+            if ($tshark -and $R.Extra.Captura -and $R.Extra.Captura -like '*.pcap*') {
+                Log 'Analisando a captura com tshark...'
+                $phs = Invoke-Cmd $tshark ('-r "{0}" -q -z io,phs' -f $R.Extra.Captura) 120000 -Utf8
+                $claros = @()
+                foreach ($prot in @(@('telnet', 'Telnet'), @('ftp', 'FTP'), @('http', 'HTTP'), @('tftp', 'TFTP'), @('smb\b', 'SMBv1'), @('llmnr', 'LLMNR'), @('nbns', 'NetBIOS-NS'), @('nbdgm', 'NetBIOS'))) { if ($phs -match ('(?im)\b' + $prot[0])) { $claros += $prot[1] } }
+                if ($claros.Count) { Add-Achado $R 'Segurança' 'Médio' ("Protocolos sem criptografia/legados vistos na rede: {0}." -f (($claros | Select-Object -Unique) -join ', ')) 'Tráfego em texto puro pode ser interceptado. Migrar para alternativas seguras (HTTPS, SFTP/SSH, SMBv3) e desativar LLMNR/NBT-NS.' }
+                $linhas = @($phs -split "`n" | Where-Object { $_ -match '\S' -and $_ -notmatch '====|Protocol Hierarchy|frames:' } | Select-Object -First 40 | ForEach-Object { [pscustomobject]@{ 'Hierarquia de protocolos (tshark)' = ($_.TrimEnd()) } })
+                Add-Tabela $R 'Protocolos observados na captura (tshark -z io,phs)' $linhas
+            }
+            elseif ($R.Extra.Captura) { Add-Item $R 'Análise da captura' 'Arquivo salvo para abrir manualmente no Wireshark (tshark não instalado para análise automática)' 'Info' }
+        }
+        else { Add-Item $R 'Captura de pacotes' 'Não executada: pktmon indisponível (Windows anterior ao 10 1809/Server 2019) e Wireshark/tshark não instalado' 'Atenção' }
+    }
+    else { Add-Item $R 'Captura de pacotes' 'Não executada (opção desmarcada)' }
+    $R
+}}
 )
 
 # =====================================================================
@@ -1912,6 +2097,7 @@ function New-Relatorio($Info) {
     $dir = Join-Path $raiz ("{0}_{1}_{2}" -f $Global:Inicio.ToString('yyyy-MM-dd_HHmm'), $limpa, $env:COMPUTERNAME)
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     $dPr = Join-Path $dir 'prints'; New-Item -ItemType Directory -Path $dPr -Force | Out-Null
+    foreach ($kk in $Global:Resultados.Keys) { $cap = $Global:Resultados[$kk].Extra.Captura; if ($cap -and (Test-Path $cap)) { try { Copy-Item $cap (Join-Path $dir ('captura_rede' + [IO.Path]::GetExtension($cap))) -Force } catch {} } }
     $utf8 = New-Object System.Text.UTF8Encoding $false
 
     # capturas de tela
@@ -2249,7 +2435,7 @@ function Save-Config {
     try {
         New-Item -ItemType Directory -Path $Global:CfgDir -Force | Out-Null
         @{ Tecnico = $txtTecnico.Text; Timbrado = $Global:Timbrado; Topo = [int]$nudTopo.Value; Base = [int]$nudBase.Value; Lado = [int]$nudLado.Value
-           Disco = $chkDisco.Checked; Leitura = $chkLeitura.Checked; Memoria = $chkMemoria.Checked; WU = $chkWU.Checked; Winget = $chkWinget.Checked; Som = $chkSom.Checked } | ConvertTo-Json | Set-Content -Path $Global:CfgArq -Encoding UTF8
+           Disco = $chkDisco.Checked; Leitura = $chkLeitura.Checked; Memoria = $chkMemoria.Checked; Captura = $chkCaptura.Checked; WU = $chkWU.Checked; Winget = $chkWinget.Checked; Som = $chkSom.Checked } | ConvertTo-Json | Set-Content -Path $Global:CfgArq -Encoding UTF8
     } catch {}
 }
 
@@ -2816,6 +3002,7 @@ function Show-Ativacao {
 # ---------------------------------------------------------------------
 if ($SemInterface) {
     $Global:Cfg.TesteDisco = $true; $Global:Cfg.LeituraCompleta = $false; $Global:Cfg.TesteMemoria = $true; $Global:Cfg.BuscarWU = $false; $Global:Cfg.Winget = $true; $Global:Cfg.TesteSom = $false
+    $Global:Cfg.SO = $Global:SO; $Global:Cfg.CapturaRede = [bool]$Capturar; $Global:Cfg.CapSeg = 12
     if ($Saida) { $Global:PastaRelatorios = $Saida }
     $Global:Inicio = Get-Date
     $Global:IdAud = 'AUD-{0}-{1}' -f $Global:Inicio.ToString('yyyyMMdd-HHmm'), ([guid]::NewGuid().ToString('N').Substring(0, 4).ToUpper())
@@ -2886,15 +3073,16 @@ $lt2 = New-Ctl Label 104 ($y + 22) 50 18 'Rodapé'; $nudBase = New-Ctl NumericUp
 $lt3 = New-Ctl Label 208 ($y + 22) 46 18 'Lados'; $nudLado = New-Ctl NumericUpDown 252 ($y + 19) 48 24
 foreach ($nu in @($nudTopo, $nudBase, $nudLado)) { $nu.Minimum = 5; $nu.Maximum = 120 }
 $nudTopo.Value = 40; $nudBase.Value = 28; $nudLado.Value = 18; $y += 54
-$grp = New-Ctl GroupBox 12 $y 290 164 'Opções'
+$grp = New-Ctl GroupBox 12 $y 290 188 'Opções'
 $chkDisco = New-Ctl CheckBox 10 20 275 20 'Teste de leitura dos discos (todos)'; $chkDisco.Checked = $true
 $chkLeitura = New-Ctl CheckBox 24 42 262 18 'Leitura completa, setor por setor (lento!)'; $chkLeitura.Checked = $false; $chkLeitura.Font = New-Object Drawing.Font('Segoe UI', 8)
 $chkMemoria = New-Ctl CheckBox 10 64 275 20 'Teste de integridade da RAM (~1 min)'; $chkMemoria.Checked = $true
-$chkWU = New-Ctl CheckBox 10 87 275 20 'Buscar atualizações pendentes do Windows'; $chkWU.Checked = $true
-$chkWinget = New-Ctl CheckBox 10 110 275 20 'Atualizações de programas (winget)'; $chkWinget.Checked = $true
-$chkSom = New-Ctl CheckBox 10 133 275 20 'Teste audível de som (tocar tom)'; $chkSom.Checked = $true
+$chkCaptura = New-Ctl CheckBox 10 87 275 20 'Captura de pacotes de rede (~1 min)'; $chkCaptura.Checked = $false
+$chkWU = New-Ctl CheckBox 10 110 275 20 'Buscar atualizações pendentes do Windows'; $chkWU.Checked = $true
+$chkWinget = New-Ctl CheckBox 10 133 275 20 'Atualizações de programas (winget)'; $chkWinget.Checked = $true
+$chkSom = New-Ctl CheckBox 10 156 275 20 'Teste audível de som (tocar tom)'; $chkSom.Checked = $true
 $chkDisco.Add_CheckedChanged({ $chkLeitura.Enabled = $chkDisco.Checked })
-$grp.Controls.AddRange(@($chkDisco, $chkLeitura, $chkMemoria, $chkWU, $chkWinget, $chkSom)); $y += 172
+$grp.Controls.AddRange(@($chkDisco, $chkLeitura, $chkMemoria, $chkCaptura, $chkWU, $chkWinget, $chkSom)); $y += 196
 $l6 = New-Ctl Label 12 $y 290 18 'Testes a executar'
 $clb = New-Ctl CheckedListBox 12 ($y + 18) 288 150; $clb.CheckOnClick = $true; $clb.IntegralHeight = $false
 foreach ($t in $Global:Testes) { $i = $clb.Items.Add($t.Nome); $clb.SetItemChecked($i, $true) }
@@ -2961,6 +3149,7 @@ if (Test-Path $Global:CfgArq) {
         if ($null -ne $c.Disco) { $chkDisco.Checked = [bool]$c.Disco; $chkWU.Checked = [bool]$c.WU; $chkWinget.Checked = [bool]$c.Winget; $chkSom.Checked = [bool]$c.Som }
         if ($null -ne $c.Memoria) { $chkMemoria.Checked = [bool]$c.Memoria }
         if ($null -ne $c.Leitura) { $chkLeitura.Checked = [bool]$c.Leitura }
+        if ($null -ne $c.Captura) { $chkCaptura.Checked = [bool]$c.Captura }
         $chkLeitura.Enabled = $chkDisco.Checked
     } catch {}
 }
@@ -3026,6 +3215,7 @@ $btnIniciar.Add_Click({
     $Global:Rodando = $true; $Global:Cancelar = $false; $Global:Sync['Cancelar'] = $false
     Set-BotoesAcao $false; $btnPasta.Enabled = $false
     $Global:Cfg.TesteDisco = $chkDisco.Checked; $Global:Cfg.LeituraCompleta = ($chkDisco.Checked -and $chkLeitura.Checked); $Global:Cfg.TesteMemoria = $chkMemoria.Checked; $Global:Cfg.BuscarWU = $chkWU.Checked; $Global:Cfg.Winget = $chkWinget.Checked; $Global:Cfg.TesteSom = $chkSom.Checked
+    $Global:Cfg.SO = $Global:SO; $Global:Cfg.CapturaRede = $chkCaptura.Checked; $Global:Cfg.CapSeg = 45
     $Global:Resultados.Clear(); $Global:Prints.Clear(); $txtLog.Clear(); $dgv.Rows.Clear()
     foreach ($tbId in @($Global:TabMap.Keys)) { try { [void]$tabs.TabPages.Remove($Global:TabMap[$tbId].Page) } catch {} }
     $Global:TabMap.Clear()
