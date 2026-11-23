@@ -3095,6 +3095,8 @@ if ($TestarInterface) {
             [System.Windows.Forms.Application]::DoEvents()
             $cap = if ($Global:TabMap.ContainsKey('sistema')) { Get-Print $Global:TabMap['sistema'].Content } else { Get-Print }
             [IO.File]::WriteAllBytes((Join-Path $pasta 'interface.jpg'), $cap)
+            $alt = if ($Global:TabMap.ContainsKey('sistema')) { $Global:TabMap['sistema'].Content.Height } else { 0 }
+            [IO.File]::WriteAllText((Join-Path $pasta 'altura.txt'), [string]$alt)
         }
         catch { try { [IO.File]::WriteAllText((Join-Path $pasta 'erro_interface.txt'), ($_ | Out-String)) } catch {} }
         finally { $form.Close() }

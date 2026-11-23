@@ -69,6 +69,11 @@ jobs:
           if (-not $p.WaitForExit(120000)) { $p.Kill(); Write-Host 'A janela nao fechou sozinha'; exit 1 }
           Get-Content "$saida\script\erro_interface.txt" -ErrorAction SilentlyContinue
           if (-not (Test-Path "$saida\script\interface.jpg")) { Write-Host 'Print da interface nao gerado'; Get-Content "$env:TEMP\AuditorTI_erro.log" -ErrorAction SilentlyContinue; exit 1 }
+          $alt = [int](Get-Content "$saida\script\altura.txt" -ErrorAction SilentlyContinue)
+          Write-Host "Altura da aba montada: $alt px"
+          if (Test-Path "$env:TEMP\AuditorTI_erro.log") { Write-Host 'Log de erro presente:'; Get-Content "$env:TEMP\AuditorTI_erro.log"; exit 1 }
+          if ($alt -lt 150) { Write-Host 'A aba nao montou o conteudo detalhado (altura baixa)'; exit 1 }
+          Write-Host 'Abas detalhadas OK'
 
       - name: Instalar Inno Setup
         shell: pwsh
