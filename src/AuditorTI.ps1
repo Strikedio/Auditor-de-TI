@@ -1758,7 +1758,7 @@ table.dados tbody tr:nth-child(even) td { background: rgba(240,244,248,.9); }
 .achado.critico { border-color: #c62828; } .achado.alto { border-color: #e65100; } .achado.medio { border-color: #f9a825; } .achado.baixo { border-color: #78909c; }
 .achado .rec { color: #334e68; font-size: 8.5pt; margin-top: .6mm; }
 .fig { page-break-inside: avoid; text-align: center; margin: 3mm 0 4mm; }
-.fig img { max-width: 100%; max-height: 105mm; border: 1px solid #bcccdc; }
+.fig img { max-width: 100%; max-height: 180mm; border: 1px solid #bcccdc; }
 .fig .leg { font-size: 7.5pt; color: #627d98; margin-top: 1mm; }
 .cab-teste { display: flex; justify-content: space-between; align-items: baseline; }
 .cab-teste .meta { font-size: 8pt; color: #627d98; }
@@ -2044,27 +2044,111 @@ function Invoke-Teste($t, $item) {
     return $res
 }
 
-function Show-Resultado([string]$id) {
-    $dgv.Rows.Clear()
+function Get-CorBadge([string]$s) {
+    switch ($s) { 'Crítico' { [Drawing.Color]::FromArgb(198, 40, 40) } 'Alto' { [Drawing.Color]::FromArgb(230, 81, 0) } 'Médio' { [Drawing.Color]::FromArgb(249, 168, 37) } 'Baixo' { [Drawing.Color]::FromArgb(120, 144, 156) } 'OK' { [Drawing.Color]::FromArgb(46, 125, 50) } 'Atenção' { [Drawing.Color]::FromArgb(249, 168, 37) } default { [Drawing.Color]::FromArgb(144, 164, 174) } }
+}
+function ConvertTo-DataTable($rows) {
+    $dt = New-Object System.Data.DataTable
+    $cols = @($rows[0].PSObject.Properties.Name)
+    foreach ($c in $cols) { [void]$dt.Columns.Add([string]$c) }
+    foreach ($r in $rows) { $v = foreach ($c in $cols) { $x = [string]$r.$c; if ($x.Length -gt 300) { $x = $x.Substring(0, 297) + '...' }; $x }; [void]$dt.Rows.Add($v) }
+    return , $dt
+}
+function New-GridBase {
+    $g = New-Object Windows.Forms.DataGridView
+    $g.ReadOnly = $true; $g.AllowUserToAddRows = $false; $g.AllowUserToResizeRows = $false; $g.RowHeadersVisible = $false
+    $g.BackgroundColor = [Drawing.Color]::White; $g.BorderStyle = 'FixedSingle'; $g.ScrollBars = 'None'
+    $g.AutoSizeRowsMode = 'AllCells'; $g.AutoSizeColumnsMode = 'Fill'; $g.SelectionMode = 'FullRowSelect'
+    $g.ColumnHeadersHeightSizeMode = 'DisableResizing'; $g.EnableHeadersVisualStyles = $false
+    $g.ColumnHeadersDefaultCellStyle.Font = New-Object Drawing.Font('Segoe UI', 8.5, [Drawing.FontStyle]::Bold)
+    $g.ColumnHeadersDefaultCellStyle.BackColor = [Drawing.Color]::FromArgb(18, 52, 86); $g.ColumnHeadersDefaultCellStyle.ForeColor = [Drawing.Color]::White
+    $g.DefaultCellStyle.Font = New-Object Drawing.Font('Segoe UI', 8.5); $g.DefaultCellStyle.WrapMode = 'True'
+    $g.AlternatingRowsDefaultCellStyle.BackColor = [Drawing.Color]::FromArgb(240, 244, 248)
+    return $g
+}
+function Set-GridHeight($g, [int]$maxH = 560) {
+    $h = $g.ColumnHeadersHeight + 3
+    foreach ($row in $g.Rows) { $h += $row.Height }
+    if ($h -gt $maxH) { $g.ScrollBars = 'Vertical'; $h = $maxH }
+    $g.Height = $h
+}
+function Add-Titulo($parent, [int]$x, [int]$y, [int]$w, [string]$t) {
+    $l = New-Object Windows.Forms.Label; $l.AutoSize = $false; $l.Width = $w - $x; $l.Height = 20; $l.Location = New-Object Drawing.Point($x, $y)
+    $l.Text = $t; $l.Font = New-Object Drawing.Font('Segoe UI', 9.5, [Drawing.FontStyle]::Bold); $l.ForeColor = [Drawing.Color]::FromArgb(18, 52, 86)
+    $parent.Controls.Add($l); return ($y + 23)
+}
+function Add-WrapLabel($parent, [int]$x, [int]$y, [int]$w, [string]$t, [single]$sz, $color) {
+    $f = New-Object Drawing.Font('Segoe UI', $sz)
+    $m = [System.Windows.Forms.TextRenderer]::MeasureText($t, $f, (New-Object Drawing.Size($w, 1)), [System.Windows.Forms.TextFormatFlags]::WordBreak)
+    $l = New-Object Windows.Forms.Label; $l.AutoSize = $false; $l.Width = $w; $l.Height = [math]::Max(15, $m.Height + 2); $l.Location = New-Object Drawing.Point($x, $y)
+    $l.Text = $t; $l.Font = $f; if ($color) { $l.ForeColor = $color }
+    $parent.Controls.Add($l); return ($y + $l.Height)
+}
+function Add-AchadoUI($parent, [int]$x, [int]$y, [int]$w, $a) {
+    $txt = ("[{0} - {1}] {2}`r`n→ {3}" -f $a.Severidade, $a.Categoria, $a.Achado, $a.Recomendacao)
+    $f = New-Object Drawing.Font('Segoe UI', 8.5); $innerW = $w - $x - 16
+    $m = [System.Windows.Forms.TextRenderer]::MeasureText($txt, $f, (New-Object Drawing.Size($innerW, 1)), [System.Windows.Forms.TextFormatFlags]::WordBreak)
+    $pnl = New-Object Windows.Forms.Panel; $pnl.Location = New-Object Drawing.Point($x, $y); $pnl.Width = $w - $x; $pnl.Height = [math]::Max(28, $m.Height + 10); $pnl.BackColor = Get-CorSituacao $a.Severidade
+    $bar = New-Object Windows.Forms.Panel; $bar.Location = New-Object Drawing.Point(0, 0); $bar.Width = 5; $bar.Height = $pnl.Height; $bar.BackColor = Get-CorBadge $a.Severidade; $bar.Dock = 'Left'
+    $l = New-Object Windows.Forms.Label; $l.AutoSize = $false; $l.Location = New-Object Drawing.Point(11, 4); $l.Width = $innerW; $l.Height = $m.Height + 2; $l.Text = $txt; $l.Font = $f
+    $pnl.Controls.Add($l); $pnl.Controls.Add($bar); $parent.Controls.Add($pnl)
+    return ($y + $pnl.Height)
+}
+function Get-TabTeste([string]$id, [string]$nome) {
+    if ($Global:TabMap.ContainsKey($id)) { return $Global:TabMap[$id] }
+    $tp = New-Object Windows.Forms.TabPage; $tp.Text = $nome; $tp.BackColor = [Drawing.Color]::White; $tp.Tag = $id
+    $hostp = New-Object Windows.Forms.Panel; $hostp.Dock = 'Fill'; $hostp.AutoScroll = $true; $hostp.BackColor = [Drawing.Color]::White
+    $content = New-Object Windows.Forms.Panel; $content.Location = New-Object Drawing.Point(0, 0); $content.BackColor = [Drawing.Color]::White; $content.Width = 10; $content.Height = 10
+    $hostp.Controls.Add($content); $tp.Controls.Add($hostp); [void]$tabs.TabPages.Add($tp)
+    $o = @{ Page = $tp; Host = $hostp; Content = $content }; $Global:TabMap[$id] = $o; return $o
+}
+function Fill-TabTeste([string]$id) {
     if (-not $Global:Resultados.Contains($id)) { return }
-    $r = $Global:Resultados[$id]
-    $lblGrid.Text = "Resultados: $($r.Nome)"
-    foreach ($i in $r.Itens) {
-        $n = $dgv.Rows.Add($i.Item, $i.Valor, $i.Status)
-        $dgv.Rows[$n].DefaultCellStyle.BackColor = Get-CorSituacao $i.Status
+    $r = $Global:Resultados[$id]; $o = Get-TabTeste $id $r.Nome
+    $content = $o.Content; $content.SuspendLayout(); $content.Controls.Clear()
+    $W = [math]::Max(700, $o.Host.ClientSize.Width - 26); $y = 8
+    $hd = New-Object Windows.Forms.Label; $hd.AutoSize = $false; $hd.Width = $W; $hd.Height = 30; $hd.Location = New-Object Drawing.Point(8, $y)
+    $hd.Font = New-Object Drawing.Font('Segoe UI', 12, [Drawing.FontStyle]::Bold); $hd.Text = ("{0}    [ {1} ]" -f $r.Nome, $r.Situacao); $hd.BackColor = Get-CorSituacao $r.Situacao; $hd.TextAlign = 'MiddleLeft'
+    $content.Controls.Add($hd); $y += 36
+    if ($r.Desc) { $y = (Add-WrapLabel $content 8 $y ($W) ("Escopo: " + $r.Desc) 8 ([Drawing.Color]::DimGray)) + 6 }
+    if ($r.Itens.Count) {
+        $y = Add-Titulo $content 8 $y $W 'Verificações'
+        $dt = ConvertTo-DataTable (@($r.Itens | ForEach-Object { [pscustomobject]@{ 'Verificação' = $_.Item; 'Resultado' = $_.Valor; 'Situação' = $_.Status } }))
+        $g = New-GridBase; $g.Location = New-Object Drawing.Point(8, $y); $g.Width = $W; $g.DataSource = $dt
+        $g.Columns[0].FillWeight = 32; $g.Columns[1].FillWeight = 54; $g.Columns[2].FillWeight = 14
+        foreach ($row in $g.Rows) { $row.DefaultCellStyle.BackColor = Get-CorSituacao ([string]$row.Cells[2].Value) }
+        Set-GridHeight $g; $content.Controls.Add($g); $y += $g.Height + 12
     }
-    foreach ($a in ($r.Achados | Sort-Object @{e = { Get-RankSev $_.Severidade } })) {
-        $n = $dgv.Rows.Add(("► {0} ({1})" -f $a.Severidade, $a.Categoria), ("{0}  →  {1}" -f $a.Achado, $a.Recomendacao), $a.Severidade)
-        $dgv.Rows[$n].DefaultCellStyle.BackColor = Get-CorSituacao $a.Severidade
-        $dgv.Rows[$n].DefaultCellStyle.Font = New-Object Drawing.Font('Segoe UI', 9, [Drawing.FontStyle]::Bold)
+    $achs = @($r.Achados | Sort-Object @{e = { Get-RankSev $_.Severidade } })
+    if ($achs.Count) {
+        $y = Add-Titulo $content 8 $y $W 'Pontos encontrados'
+        foreach ($a in $achs) { $y = (Add-AchadoUI $content 8 $y $W $a) + 6 }
+        $y += 4
     }
-    foreach ($tb in $r.Tabelas) { $n = $dgv.Rows.Add('Tabela', ("{0} ({1} registros - ver relatório)" -f $tb.Titulo, @($tb.Linhas).Count), 'Info') }
+    foreach ($tb in $r.Tabelas) {
+        $rows = @($tb.Linhas); if (-not $rows.Count) { continue }
+        $y = Add-Titulo $content 8 $y $W ("{0}  ({1} registro(s))" -f $tb.Titulo, $rows.Count)
+        $dt = ConvertTo-DataTable (@($rows | Select-Object -First 100))
+        $g = New-GridBase; $g.Location = New-Object Drawing.Point(8, $y); $g.Width = $W; $g.DataSource = $dt
+        Set-GridHeight $g; $content.Controls.Add($g); $y += $g.Height + 6
+        if ($rows.Count -gt 100) { $y = (Add-WrapLabel $content 8 $y $W ("... e mais {0} registro(s) no relatório PDF." -f ($rows.Count - 100)) 8 ([Drawing.Color]::DimGray)) + 6 }
+        $y += 6
+    }
+    $content.Width = $W + 16; $content.Height = $y + 8; $content.ResumeLayout()
+}
+function Show-Resultado([string]$id) {
+    if (-not $Global:Resultados.Contains($id)) { return }
+    $r = $Global:Resultados[$id]; $o = Get-TabTeste $id $r.Nome
+    $tabs.SelectedTab = $o.Page; [System.Windows.Forms.Application]::DoEvents()
+    Fill-TabTeste $id
 }
 
-function Get-Print {
+function Get-Print([object]$ctl = $null, [int]$maxH = 1500) {
+    if (-not $ctl) { $ctl = $form }
     $form.Refresh(); [System.Windows.Forms.Application]::DoEvents()
-    $bmp = New-Object Drawing.Bitmap $form.Width, $form.Height
-    $form.DrawToBitmap($bmp, (New-Object Drawing.Rectangle 0, 0, $form.Width, $form.Height))
+    $w = [math]::Max(50, [int]$ctl.Width); $h = [math]::Max(50, [math]::Min([int]$ctl.Height, $maxH))
+    $bmp = New-Object Drawing.Bitmap $w, $h
+    $ctl.DrawToBitmap($bmp, (New-Object Drawing.Rectangle 0, 0, $w, $h))
     $ms = New-Object IO.MemoryStream
     $enc = [Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' } | Select-Object -First 1
     $ep = New-Object Drawing.Imaging.EncoderParameters 1
@@ -2593,6 +2677,7 @@ function Invoke-LoteCore([string]$Titulo, $Codigo, [int]$Timeout, $Selecao) {
 # ---------------------------------------------------------------------
 function Show-Itens($itens, [string]$titulo) {
     $dgv.Rows.Clear(); $lblGrid.Text = $titulo
+    if ($Global:TabAcoes) { $tabs.SelectedTab = $Global:TabAcoes }
     foreach ($i in $itens) { $n = $dgv.Rows.Add($i.Item, $i.Valor, $i.Status); $dgv.Rows[$n].DefaultCellStyle.BackColor = Get-CorSituacao $i.Status }
 }
 
@@ -2815,19 +2900,29 @@ $lblStatus = New-Object Windows.Forms.Label; $lblStatus.Dock = 'Top'; $lblStatus
 $lblStatus.Text = 'Preencha os dados do cliente e clique em INICIAR AUDITORIA.'
 $prog = New-Object Windows.Forms.ProgressBar; $prog.Dock = 'Top'; $prog.Height = 16
 $esp1 = New-Object Windows.Forms.Panel; $esp1.Dock = 'Top'; $esp1.Height = 6
-$lv = New-Object Windows.Forms.ListView; $lv.Dock = 'Top'; $lv.Height = 268; $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.GridLines = $true; $lv.MultiSelect = $false; $lv.HideSelection = $false
+$lv = New-Object Windows.Forms.ListView; $lv.Dock = 'Fill'; $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.GridLines = $true; $lv.MultiSelect = $false; $lv.HideSelection = $false
 foreach ($c in @(@('Teste', 290), @('Situação', 110), @('Tempo', 60), @('Resumo', 380))) { [void]$lv.Columns.Add($c[0], $c[1]) }
 $Global:LvMap = @{}
 foreach ($t in $Global:Testes) {
     $it = New-Object Windows.Forms.ListViewItem($t.Nome); [void]$it.SubItems.Add('Aguardando'); [void]$it.SubItems.Add(''); [void]$it.SubItems.Add(''); $it.Tag = $t.Id
     [void]$lv.Items.Add($it); $Global:LvMap[$t.Id] = $it
 }
-$lblGrid = New-Object Windows.Forms.Label; $lblGrid.Dock = 'Top'; $lblGrid.Height = 24; $lblGrid.Text = 'Resultados'; $lblGrid.TextAlign = 'BottomLeft'; $lblGrid.Font = New-Object Drawing.Font('Segoe UI', 9, [Drawing.FontStyle]::Bold)
+$tabs = New-Object Windows.Forms.TabControl; $tabs.Dock = 'Fill'; $tabs.Font = New-Object Drawing.Font('Segoe UI', 9)
+$Global:TabMap = @{}
+$tabResumo = New-Object Windows.Forms.TabPage; $tabResumo.Text = 'Resumo'; $tabResumo.BackColor = [Drawing.Color]::White; $tabResumo.Padding = New-Object Windows.Forms.Padding(3)
+$tabResumo.Controls.Add($lv)
+[void]$tabs.TabPages.Add($tabResumo)
+# Aba de manutenção (resultados de Otimizar / Solucionar problemas / Ativação)
+$lblGrid = New-Object Windows.Forms.Label; $lblGrid.Dock = 'Top'; $lblGrid.Height = 22; $lblGrid.Text = 'Resultados das ações'; $lblGrid.TextAlign = 'BottomLeft'; $lblGrid.Font = New-Object Drawing.Font('Segoe UI', 9, [Drawing.FontStyle]::Bold)
 $dgv = New-Object Windows.Forms.DataGridView; $dgv.Dock = 'Fill'; $dgv.ReadOnly = $true; $dgv.AllowUserToAddRows = $false; $dgv.AllowUserToDeleteRows = $false; $dgv.RowHeadersVisible = $false
 $dgv.SelectionMode = 'FullRowSelect'; $dgv.BackgroundColor = [Drawing.Color]::White; $dgv.BorderStyle = 'FixedSingle'
 $dgv.DefaultCellStyle.WrapMode = 'True'; $dgv.AutoSizeRowsMode = 'AllCells'; $dgv.ColumnHeadersDefaultCellStyle.Font = New-Object Drawing.Font('Segoe UI', 9, [Drawing.FontStyle]::Bold)
-[void]$dgv.Columns.Add('c1', 'Verificação'); [void]$dgv.Columns.Add('c2', 'Resultado'); [void]$dgv.Columns.Add('c3', 'Situação')
-$dgv.Columns[0].Width = 270; $dgv.Columns[1].AutoSizeMode = 'Fill'; $dgv.Columns[2].Width = 90
+[void]$dgv.Columns.Add('c1', 'Etapa'); [void]$dgv.Columns.Add('c2', 'Resultado'); [void]$dgv.Columns.Add('c3', 'Situação')
+$dgv.Columns[0].Width = 280; $dgv.Columns[1].AutoSizeMode = 'Fill'; $dgv.Columns[2].Width = 90
+$tabAcoes = New-Object Windows.Forms.TabPage; $tabAcoes.Text = 'Manutenção'; $tabAcoes.BackColor = [Drawing.Color]::White; $tabAcoes.Padding = New-Object Windows.Forms.Padding(3)
+$tabAcoes.Controls.Add($dgv); $tabAcoes.Controls.Add($lblGrid)
+[void]$tabs.TabPages.Add($tabAcoes)
+$Global:TabAcoes = $tabAcoes
 $txtLog = New-Object Windows.Forms.TextBox; $txtLog.Dock = 'Bottom'; $txtLog.Height = 120; $txtLog.Multiline = $true; $txtLog.ScrollBars = 'Vertical'; $txtLog.ReadOnly = $true
 $txtLog.Font = New-Object Drawing.Font('Consolas', 8.5); $txtLog.BackColor = [Drawing.Color]::FromArgb(250, 250, 250)
 $pAcoes = New-Object Windows.Forms.FlowLayoutPanel; $pAcoes.Dock = 'Top'; $pAcoes.Height = 44; $pAcoes.WrapContents = $false
@@ -2837,8 +2932,8 @@ $btnOtimizar = New-Object Windows.Forms.Button; $btnOtimizar.Text = 'Otimizar Wi
 $btnOtimizar.BackColor = [Drawing.Color]::FromArgb(18, 52, 86); $btnOtimizar.ForeColor = 'White'; $btnOtimizar.FlatStyle = 'Flat'; $btnOtimizar.Font = New-Object Drawing.Font('Segoe UI', 9.5, [Drawing.FontStyle]::Bold)
 $btnAtivar = New-Object Windows.Forms.Button; $btnAtivar.Text = 'Ativação do Windows'; $btnAtivar.Size = New-Object Drawing.Size(170, 36); $btnAtivar.FlatStyle = 'Flat'
 $pAcoes.Controls.AddRange(@($btnCorrigir, $btnOtimizar, $btnAtivar))
-$pDir.Controls.Add($dgv); $pDir.Controls.Add($lblGrid); $pDir.Controls.Add($lv); $pDir.Controls.Add($esp1); $pDir.Controls.Add($prog); $pDir.Controls.Add($lblStatus); $pDir.Controls.Add($pAcoes); $pDir.Controls.Add($txtLog)
-$dgv.BringToFront()
+$pDir.Controls.Add($tabs); $pDir.Controls.Add($esp1); $pDir.Controls.Add($prog); $pDir.Controls.Add($lblStatus); $pDir.Controls.Add($pAcoes); $pDir.Controls.Add($txtLog)
+$tabs.BringToFront()
 
 $form.Controls.Add($pDir); $form.Controls.Add($pEsq); $form.Controls.Add($pTopo)
 
@@ -2920,6 +3015,8 @@ $btnIniciar.Add_Click({
     Set-BotoesAcao $false; $btnPasta.Enabled = $false
     $Global:Cfg.TesteDisco = $chkDisco.Checked; $Global:Cfg.LeituraCompleta = ($chkDisco.Checked -and $chkLeitura.Checked); $Global:Cfg.TesteMemoria = $chkMemoria.Checked; $Global:Cfg.BuscarWU = $chkWU.Checked; $Global:Cfg.Winget = $chkWinget.Checked; $Global:Cfg.TesteSom = $chkSom.Checked
     $Global:Resultados.Clear(); $Global:Prints.Clear(); $txtLog.Clear(); $dgv.Rows.Clear()
+    foreach ($tbId in @($Global:TabMap.Keys)) { try { [void]$tabs.TabPages.Remove($Global:TabMap[$tbId].Page) } catch {} }
+    $Global:TabMap.Clear()
     if (-not $manter) { $Global:Acoes.Clear(); $Global:Lotes.Clear(); $Global:LogGeral.Clear() }
     foreach ($it in $lv.Items) { $it.SubItems[1].Text = $(if ($sel.Id -contains $it.Tag) { 'Aguardando' } else { 'Não executado' }); $it.SubItems[2].Text = ''; $it.SubItems[3].Text = ''; $it.BackColor = [Drawing.Color]::White }
     $Global:Inicio = Get-Date
@@ -2933,7 +3030,6 @@ $btnIniciar.Add_Click({
         $it = $Global:LvMap[$t.Id]
         $it.SubItems[1].Text = 'Executando...'; $it.BackColor = Get-CorSituacao 'Executando'; $it.EnsureVisible()
         $lblStatus.Text = "[$n/$($sel.Count)] Executando: $($t.Nome)"
-        $lblGrid.Text = "Resultados: $($t.Nome)"; $dgv.Rows.Clear()
         Write-LogUI "=== $($t.Nome) ==="
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $res = Invoke-Teste $t $it
@@ -2950,7 +3046,7 @@ $btnIniciar.Add_Click({
         Show-Resultado $t.Id
         $it.Selected = $true
         Write-LogUI "Concluído: $($t.Nome) -> $($res.Situacao) ($nA achado(s))"
-        $Global:Prints[$t.Id] = Get-Print
+        $Global:Prints[$t.Id] = $(if ($Global:TabMap.ContainsKey($t.Id)) { Get-Print $Global:TabMap[$t.Id].Content } else { Get-Print })
         $prog.Value = $n
     }
     $Global:Fim = Get-Date
@@ -2978,11 +3074,18 @@ $form.Add_FormClosing({
 if ($TestarInterface) {
     # verificação automática: mostra a janela, salva um print e fecha
     $form.Add_Shown({
-        $Global:Resultados['sistema'] = @{ Nome = 'Teste'; Itens = @([pscustomobject]@{ Item = 'Interface'; Valor = 'Janela criada com sucesso'; Status = 'OK' }); Achados = @(); Tabelas = @() }
+        $Global:Resultados['sistema'] = @{
+            Nome = 'Sistema (teste)'; Situacao = 'Atenção'; Desc = 'Verificação automática da interface em abas.'
+            Itens = @([pscustomobject]@{ Item = 'Interface'; Valor = 'Janela e abas criadas com sucesso'; Status = 'OK' }, [pscustomobject]@{ Item = 'Exemplo de alerta'; Valor = 'Valor de exemplo'; Status = 'Atenção' })
+            Achados = @([pscustomobject]@{ Categoria = 'Segurança'; Severidade = 'Alto'; Achado = 'Achado de exemplo para testar o layout.'; Recomendacao = 'Recomendação de exemplo.'; Penalidade = 1.0; Upgrade = $false })
+            Tabelas = @(@{ Titulo = 'Tabela de exemplo'; Linhas = @([pscustomobject]@{ Coluna1 = 'A'; Coluna2 = 'B'; Coluna3 = 'C' }, [pscustomobject]@{ Coluna1 = '1'; Coluna2 = '2'; Coluna3 = '3' }) })
+        }
         Show-Resultado 'sistema'
+        [System.Windows.Forms.Application]::DoEvents()
         $pasta = if ($Saida) { $Saida } else { $env:TEMP }
         New-Item -ItemType Directory -Path $pasta -Force | Out-Null
-        [IO.File]::WriteAllBytes((Join-Path $pasta 'interface.jpg'), (Get-Print))
+        $cap = if ($Global:TabMap.ContainsKey('sistema')) { Get-Print $Global:TabMap['sistema'].Content } else { Get-Print }
+        [IO.File]::WriteAllBytes((Join-Path $pasta 'interface.jpg'), $cap)
         $form.Close()
     })
 }
