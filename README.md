@@ -21,6 +21,9 @@ irm https://raw.githubusercontent.com/Strikedio/Auditor-de-TI/main/run.ps1 | iex
 
 Ele baixa a versão mais recente para a pasta temporária e abre o programa (confirme a permissão de Administrador). Os relatórios vão para `Documentos\AuditoriasTI` do computador. Copie a pasta do relatório e apague-a depois, se não quiser deixar nada na máquina do cliente.
 
+## Interface em abas
+Cada teste abre em sua própria aba, com os detalhes completos: a lista de verificações, os pontos encontrados (com cor por gravidade) e todas as tabelas de dados. Isso deixa a auditoria mais fácil de ler e faz os prints do relatório saírem mais detalhados.
+
 ## O que é verificado
 
 | Área | Principais verificações |
