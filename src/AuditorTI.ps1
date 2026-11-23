@@ -2106,6 +2106,7 @@ function Fill-TabTeste([string]$id) {
     if (-not $Global:Resultados.Contains($id)) { return }
     $r = $Global:Resultados[$id]; $o = Get-TabTeste $id $r.Nome
     $content = $o.Content; $content.SuspendLayout(); $content.Controls.Clear()
+  try {
     $W = [math]::Max(700, $o.Host.ClientSize.Width - 26); $y = 8
     $hd = New-Object Windows.Forms.Label; $hd.AutoSize = $false; $hd.Width = $W; $hd.Height = 30; $hd.Location = New-Object Drawing.Point(8, $y)
     $hd.Font = New-Object Drawing.Font('Segoe UI', 12, [Drawing.FontStyle]::Bold); $hd.Text = ("{0}    [ {1} ]" -f $r.Nome, $r.Situacao); $hd.BackColor = Get-CorSituacao $r.Situacao; $hd.TextAlign = 'MiddleLeft'
@@ -2134,7 +2135,14 @@ function Fill-TabTeste([string]$id) {
         if ($rows.Count -gt 100) { $y = (Add-WrapLabel $content 8 $y $W ("... e mais {0} registro(s) no relatório PDF." -f ($rows.Count - 100)) 8 ([Drawing.Color]::DimGray)) + 6 }
         $y += 6
     }
-    $content.Width = $W + 16; $content.Height = $y + 8; $content.ResumeLayout()
+    $content.Width = $W + 16; $content.Height = $y + 8
+  }
+  catch {
+    $le = New-Object Windows.Forms.Label; $le.AutoSize = $true; $le.Location = New-Object Drawing.Point(8, 8); $le.ForeColor = [Drawing.Color]::Firebrick
+    $le.Text = "Falha ao montar a aba: $($_.Exception.Message)"; $content.Controls.Add($le); $content.Width = 700; $content.Height = 60
+    try { Add-Content -Path (Join-Path $env:TEMP 'AuditorTI_erro.log') -Value ("[{0}] aba {1}: {2}" -f (Get-Date), $id, $_.Exception.Message) } catch {}
+  }
+  finally { $content.ResumeLayout() }
 }
 function Show-Resultado([string]$id) {
     if (-not $Global:Resultados.Contains($id)) { return }
@@ -3080,13 +3088,16 @@ if ($TestarInterface) {
             Achados = @([pscustomobject]@{ Categoria = 'Segurança'; Severidade = 'Alto'; Achado = 'Achado de exemplo para testar o layout.'; Recomendacao = 'Recomendação de exemplo.'; Penalidade = 1.0; Upgrade = $false })
             Tabelas = @(@{ Titulo = 'Tabela de exemplo'; Linhas = @([pscustomobject]@{ Coluna1 = 'A'; Coluna2 = 'B'; Coluna3 = 'C' }, [pscustomobject]@{ Coluna1 = '1'; Coluna2 = '2'; Coluna3 = '3' }) })
         }
-        Show-Resultado 'sistema'
-        [System.Windows.Forms.Application]::DoEvents()
         $pasta = if ($Saida) { $Saida } else { $env:TEMP }
         New-Item -ItemType Directory -Path $pasta -Force | Out-Null
-        $cap = if ($Global:TabMap.ContainsKey('sistema')) { Get-Print $Global:TabMap['sistema'].Content } else { Get-Print }
-        [IO.File]::WriteAllBytes((Join-Path $pasta 'interface.jpg'), $cap)
-        $form.Close()
+        try {
+            Show-Resultado 'sistema'
+            [System.Windows.Forms.Application]::DoEvents()
+            $cap = if ($Global:TabMap.ContainsKey('sistema')) { Get-Print $Global:TabMap['sistema'].Content } else { Get-Print }
+            [IO.File]::WriteAllBytes((Join-Path $pasta 'interface.jpg'), $cap)
+        }
+        catch { try { [IO.File]::WriteAllText((Join-Path $pasta 'erro_interface.txt'), ($_ | Out-String)) } catch {} }
+        finally { $form.Close() }
     })
 }
 [void]$form.ShowDialog()
