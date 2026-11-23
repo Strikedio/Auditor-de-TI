@@ -2047,12 +2047,17 @@ function Invoke-Teste($t, $item) {
 function Get-CorBadge([string]$s) {
     switch ($s) { 'Crítico' { [Drawing.Color]::FromArgb(198, 40, 40) } 'Alto' { [Drawing.Color]::FromArgb(230, 81, 0) } 'Médio' { [Drawing.Color]::FromArgb(249, 168, 37) } 'Baixo' { [Drawing.Color]::FromArgb(120, 144, 156) } 'OK' { [Drawing.Color]::FromArgb(46, 125, 50) } 'Atenção' { [Drawing.Color]::FromArgb(249, 168, 37) } default { [Drawing.Color]::FromArgb(144, 164, 174) } }
 }
-function ConvertTo-DataTable($rows) {
-    $dt = New-Object System.Data.DataTable
+function Add-GridDados($parent, [int]$x, [int]$y, [int]$w, $rows, $corFn) {
+    $g = New-GridBase; $g.Location = New-Object Drawing.Point($x, $y); $g.Width = $w
     $cols = @($rows[0].PSObject.Properties.Name)
-    foreach ($c in $cols) { [void]$dt.Columns.Add([string]$c) }
-    foreach ($r in $rows) { $v = foreach ($c in $cols) { $x = [string]$r.$c; if ($x.Length -gt 300) { $x = $x.Substring(0, 297) + '...' }; $x }; [void]$dt.Rows.Add($v) }
-    return , $dt
+    foreach ($c in $cols) { [void]$g.Columns.Add(('c' + [guid]::NewGuid().ToString('N')), [string]$c) }
+    foreach ($row in @($rows)) {
+        $vals = foreach ($c in $cols) { $z = [string]$row.$c; if ($z.Length -gt 300) { $z = $z.Substring(0, 297) + '...' }; $z }
+        $idx = $g.Rows.Add([object[]]$vals)
+        if ($corFn) { $cor = & $corFn $row; if ($cor) { $g.Rows[$idx].DefaultCellStyle.BackColor = $cor } }
+    }
+    $parent.Controls.Add($g)
+    return $g
 }
 function New-GridBase {
     $g = New-Object Windows.Forms.DataGridView
@@ -2067,10 +2072,11 @@ function New-GridBase {
     return $g
 }
 function Set-GridHeight($g, [int]$maxH = 560) {
+    try { $g.PerformLayout() } catch {}
     $h = $g.ColumnHeadersHeight + 3
     foreach ($row in $g.Rows) { $h += $row.Height }
     if ($h -gt $maxH) { $g.ScrollBars = 'Vertical'; $h = $maxH }
-    $g.Height = $h
+    $g.Height = [math]::Max(40, $h)
 }
 function Add-Titulo($parent, [int]$x, [int]$y, [int]$w, [string]$t) {
     $l = New-Object Windows.Forms.Label; $l.AutoSize = $false; $l.Width = $w - $x; $l.Height = 20; $l.Location = New-Object Drawing.Point($x, $y)
@@ -2114,11 +2120,10 @@ function Fill-TabTeste([string]$id) {
     if ($r.Desc) { $y = (Add-WrapLabel $content 8 $y ($W) ("Escopo: " + $r.Desc) 8 ([Drawing.Color]::DimGray)) + 6 }
     if ($r.Itens.Count) {
         $y = Add-Titulo $content 8 $y $W 'Verificações'
-        $dt = ConvertTo-DataTable (@($r.Itens | ForEach-Object { [pscustomobject]@{ 'Verificação' = $_.Item; 'Resultado' = $_.Valor; 'Situação' = $_.Status } }))
-        $g = New-GridBase; $g.Location = New-Object Drawing.Point(8, $y); $g.Width = $W; $g.DataSource = $dt
-        $g.Columns[0].FillWeight = 32; $g.Columns[1].FillWeight = 54; $g.Columns[2].FillWeight = 14
-        foreach ($row in $g.Rows) { $row.DefaultCellStyle.BackColor = Get-CorSituacao ([string]$row.Cells[2].Value) }
-        Set-GridHeight $g; $content.Controls.Add($g); $y += $g.Height + 12
+        $linhasItens = @($r.Itens | ForEach-Object { [pscustomobject]@{ 'Verificação' = $_.Item; 'Resultado' = $_.Valor; 'Situação' = $_.Status } })
+        $g = Add-GridDados $content 8 $y $W $linhasItens { param($row) Get-CorSituacao ([string]$row.'Situação') }
+        if ($g.Columns.Count -ge 3) { $g.Columns[0].FillWeight = 32; $g.Columns[1].FillWeight = 54; $g.Columns[2].FillWeight = 14 }
+        Set-GridHeight $g; $y += $g.Height + 12
     }
     $achs = @($r.Achados | Sort-Object @{e = { Get-RankSev $_.Severidade } })
     if ($achs.Count) {
@@ -2129,9 +2134,8 @@ function Fill-TabTeste([string]$id) {
     foreach ($tb in $r.Tabelas) {
         $rows = @($tb.Linhas); if (-not $rows.Count) { continue }
         $y = Add-Titulo $content 8 $y $W ("{0}  ({1} registro(s))" -f $tb.Titulo, $rows.Count)
-        $dt = ConvertTo-DataTable (@($rows | Select-Object -First 100))
-        $g = New-GridBase; $g.Location = New-Object Drawing.Point(8, $y); $g.Width = $W; $g.DataSource = $dt
-        Set-GridHeight $g; $content.Controls.Add($g); $y += $g.Height + 6
+        $g = Add-GridDados $content 8 $y $W (@($rows | Select-Object -First 100)) $null
+        Set-GridHeight $g; $y += $g.Height + 6
         if ($rows.Count -gt 100) { $y = (Add-WrapLabel $content 8 $y $W ("... e mais {0} registro(s) no relatório PDF." -f ($rows.Count - 100)) 8 ([Drawing.Color]::DimGray)) + 6 }
         $y += 6
     }
