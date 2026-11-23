@@ -21,6 +21,15 @@ irm https://raw.githubusercontent.com/Strikedio/Auditor-de-TI/main/run.ps1 | iex
 
 Ele baixa a versão mais recente para a pasta temporária e abre o programa (confirme a permissão de Administrador). Os relatórios vão para `Documentos\AuditoriasTI` do computador. Copie a pasta do relatório e apague-a depois, se não quiser deixar nada na máquina do cliente.
 
+## Compatibilidade
+Funciona em Windows 10 e 11 e em Windows Server (2016, 2019, 2022 e mais recentes), em instalação normal. Em **Server Core** (sem interface gráfica), rode em modo texto, que gera o relatório sem janela:
+
+```powershell
+.\AuditorTI.ps1 -SemInterface -Cliente "Nome do cliente" -Capturar
+```
+
+A captura de pacotes usa o **Wireshark** (`dumpcap`) se estiver instalado; senão, usa o **pktmon**, já embutido no Windows 10 1809+/Server 2019+. O arquivo `.pcapng` fica na pasta do relatório para você abrir no Wireshark.
+
 ## Interface em abas
 Cada teste abre em sua própria aba, com os detalhes completos: a lista de verificações, os pontos encontrados (com cor por gravidade) e todas as tabelas de dados. Isso deixa a auditoria mais fácil de ler e faz os prints do relatório saírem mais detalhados.
 
@@ -33,6 +42,7 @@ Cada teste abre em sua própria aba, com os detalhes completos: a lista de verif
 | Discos | SSD/HDD, saúde e **atributos S.M.A.R.T. detalhados** (estilo CrystalDiskInfo: setores realocados/pendentes, temperatura, horas ligado, erros CRC), espaço livre, velocidade de leitura/escrita |
 | Processador | Carga em repouso, benchmark, programas na inicialização, bateria |
 | Rede | IP/DNS, internet, portas abertas e processos, SMBv1, compartilhamentos, Wi-Fi |
+| Segurança de rede | LLMNR / NetBIOS-NS / mDNS (Responder), assinatura SMB, WPAD, túneis IPv6 (Teredo/ISATAP/6to4), IP forwarding, tabela ARP e detecção de spoofing, servidores DNS, descoberta de hosts na LAN e **captura de pacotes** (Wireshark/dumpcap ou pktmon nativo, gera `.pcapng`) |
 | Áudio | Dispositivos, serviços e teste audível |
 | Serviços | Não essenciais (desativa só com confirmação e gera script de restauração), terceiros sem assinatura, caminhos sem aspas |
 | Atualizações | Windows Update, reinicialização pendente, programas desatualizados (winget), acesso remoto instalado, software obsoleto |

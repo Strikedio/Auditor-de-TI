@@ -35,6 +35,19 @@ ONDE FICAM OS ARQUIVOS
   Cada relatório tem: PDF, relatorio.html, evidencias.json (dados brutos),
   prints\ e desfazer_alteracoes.ps1 (volta as configurações alteradas).
 
+SEGURANCA DE REDE E CAPTURA DE PACOTES
+  O teste 'Seguranca de rede' verifica LLMNR, NetBIOS, mDNS, assinatura SMB,
+  WPAD, tuneis IPv6, ARP (spoofing), DNS e hosts da rede local.
+  Marque 'Captura de pacotes de rede' nas Opcoes para gravar o trafego.
+  Se o Wireshark estiver instalado, ele e usado (dumpcap); senao, o pktmon
+  nativo do Windows. O arquivo captura_rede.pcapng fica na pasta do relatorio
+  para abrir no Wireshark.
+
+WINDOWS SERVER / SERVER CORE
+  Funciona em Windows 10/11 e Windows Server. No Server Core (sem janela),
+  rode em modo texto:
+    AuditorTI.ps1 -SemInterface -Cliente "Nome" -Capturar
+
 SEM PENDRIVE? Abra o PowerShell e cole:
   irm https://raw.githubusercontent.com/Strikedio/Auditor-de-TI/main/run.ps1 | iex
 

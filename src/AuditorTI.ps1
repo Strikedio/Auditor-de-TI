@@ -1698,43 +1698,57 @@ public static class AuditorBench {
     Add-Item $R 'Wireshark/tshark instalado' $(if ($tshark) { 'Sim' } else { 'Não' }) 'Info'
     Add-Item $R 'pktmon (captura nativa do Windows)' $(if ($pktmon) { 'Disponível' } else { 'Indisponível (Windows antigo)' }) 'Info'
 
-    # --- Captura de pacotes (opcional) ---
+    # --- Captura de pacotes (opcional): Wireshark (dumpcap) ou pktmon nativo ---
     if ($Cfg.CapturaRede) {
-        $seg = [int]$Cfg.CapSeg; if ($seg -lt 10) { $seg = 45 }
-        if ($pktmon) {
-            Log ("Iniciando captura de pacotes com pktmon por {0} s..." -f $seg)
-            $dir = Join-Path $env:TEMP ('AuditorTI_cap_' + (Get-Date -Format 'yyyyMMddHHmmss'))
-            New-Item -ItemType Directory -Path $dir -Force | Out-Null
-            $etl = Join-Path $dir 'captura.etl'; $pcap = Join-Path $dir 'captura_rede.pcapng'
+        $seg = [int]$Cfg.CapSeg; if ($seg -lt 5) { $seg = 45 }
+        $cdir = Join-Path $env:TEMP ('AuditorTI_cap_' + (Get-Date -Format 'yyyyMMddHHmmss')); New-Item -ItemType Directory -Path $cdir -Force | Out-Null
+        $pcap = Join-Path $cdir 'captura_rede.pcapng'
+        $dumpcap = $null
+        foreach ($c in @("$env:ProgramFiles\Wireshark\dumpcap.exe", "${env:ProgramFiles(x86)}\Wireshark\dumpcap.exe")) { if (Test-Path $c) { $dumpcap = $c; break } }
+        if (-not $dumpcap) { $dumpcap = (Get-Command dumpcap.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source }
+        $feito = $false
+        if ($dumpcap) {
+            Log ("Capturando pacotes com o Wireshark (dumpcap) por {0} s..." -f $seg)
+            $dl = Invoke-Cmd $dumpcap '-D' 20000
+            $iface = '1'; $mi = [regex]::Match($dl, '(?im)^\s*(\d+)\.'); if ($mi.Success) { $iface = $mi.Groups[1].Value }
+            $o = Invoke-Cmd $dumpcap ('-i {0} -a duration:{1} -w "{2}"' -f $iface, $seg, $pcap) (($seg + 60) * 1000)
+            Log ("   dumpcap: " + (Get-Resumo $o 1))
+            if (Test-Path $pcap) { $feito = $true }
+        }
+        if (-not $feito -and $pktmon) {
+            Log ("Capturando pacotes com pktmon (nativo do Windows) por {0} s..." -f $seg)
+            $etl = Join-Path $cdir 'captura.etl'
             [void](Invoke-Cmd $pktmon 'stop' 20000)
-            [void](Invoke-Cmd $pktmon ('start --capture --pkt-size 256 --file-name "{0}"' -f $etl) 30000)
-            if ($UltimoCodigo -ne 0 -or -not (Test-Path $etl)) { [void](Invoke-Cmd $pktmon ('start --etw --pkt-size 256 --file-name "{0}"' -f $etl) 30000) }
+            $os1 = Invoke-Cmd $pktmon ('start --capture --pkt-size 256 --file-name "{0}"' -f $etl) 30000
+            Log ("   pktmon start (cod $UltimoCodigo): " + (Get-Resumo $os1 1))
+            if (($UltimoCodigo -ne 0) -or -not (Test-Path $etl)) { $os1 = Invoke-Cmd $pktmon ('start --etw --pkt-size 256 --file-name "{0}"' -f $etl) 30000; Log ("   pktmon start alt (cod $UltimoCodigo)") }
             Start-Sleep -Seconds $seg
-            [void](Invoke-Cmd $pktmon 'stop' 60000)
-            Log 'Convertendo a captura para o formato do Wireshark (pcapng)...'
-            [void](Invoke-Cmd $pktmon ('pcapng "{0}" -o "{1}"' -f $etl, $pcap) 180000)
-            if (-not (Test-Path $pcap)) { $alt = ($pcap -replace '\.pcapng$', '.pcap'); [void](Invoke-Cmd $pktmon ('etl2pcap "{0}" -o "{1}"' -f $etl, $alt) 180000); if (Test-Path $alt) { $pcap = $alt } }
-            if (Test-Path $pcap) {
-                $tam = [math]::Round((Get-Item $pcap).Length / 1MB, 2)
-                Add-Item $R 'Captura de pacotes' ("Concluída - {0} MB ({1} s) - arquivo para abrir no Wireshark" -f $tam, $seg) 'OK'
-                $R.Extra.Captura = $pcap
-                Add-Item $R 'Arquivo da captura' ('captura_rede' + [IO.Path]::GetExtension($pcap) + ' (salvo na pasta do relatório)') 'Info'
+            $os2 = Invoke-Cmd $pktmon 'stop' 90000
+            Log ("   pktmon stop: " + (Get-Resumo $os2 1))
+            if (Test-Path $etl) {
+                $oc = Invoke-Cmd $pktmon ('pcapng "{0}" -o "{1}"' -f $etl, $pcap) 180000
+                Log ("   pktmon pcapng (cod $UltimoCodigo): " + (Get-Resumo $oc 1))
+                if (Test-Path $pcap) { $feito = $true }
+                else { $R.Extra.Captura = $etl; Add-Item $R 'Captura de pacotes' 'Salva em .etl (este Windows não converte para pcapng). Converter num Windows 11/Server 2022: pktmon pcapng captura.etl -o captura.pcapng' 'Atenção' }
             }
-            else { Add-Item $R 'Captura de pacotes' 'Capturado, mas não foi possível converter para pcapng (arquivo .etl na pasta temporária)' 'Atenção'; if (Test-Path $etl) { $R.Extra.Captura = $etl } }
-
-            # Análise com tshark, se disponível
-            if ($tshark -and $R.Extra.Captura -and $R.Extra.Captura -like '*.pcap*') {
+            else { Add-Item $R 'Captura de pacotes' ("Falha ao iniciar a captura com pktmon (cód $UltimoCodigo). Em VM/NIC virtual a captura pode não funcionar.") 'Atenção' }
+        }
+        if ($feito) {
+            $tam = [math]::Round((Get-Item $pcap).Length / 1KB, 0)
+            Add-Item $R 'Captura de pacotes' ("Concluída - {0} KB em {1} s - arquivo captura_rede.pcapng (abrir no Wireshark)" -f $tam, $seg) 'OK'
+            $R.Extra.Captura = $pcap
+            if ($tshark) {
                 Log 'Analisando a captura com tshark...'
-                $phs = Invoke-Cmd $tshark ('-r "{0}" -q -z io,phs' -f $R.Extra.Captura) 120000 -Utf8
+                $phs = Invoke-Cmd $tshark ('-r "{0}" -q -z io,phs' -f $pcap) 120000 -Utf8
                 $claros = @()
                 foreach ($prot in @(@('telnet', 'Telnet'), @('ftp', 'FTP'), @('http', 'HTTP'), @('tftp', 'TFTP'), @('smb\b', 'SMBv1'), @('llmnr', 'LLMNR'), @('nbns', 'NetBIOS-NS'), @('nbdgm', 'NetBIOS'))) { if ($phs -match ('(?im)\b' + $prot[0])) { $claros += $prot[1] } }
-                if ($claros.Count) { Add-Achado $R 'Segurança' 'Médio' ("Protocolos sem criptografia/legados vistos na rede: {0}." -f (($claros | Select-Object -Unique) -join ', ')) 'Tráfego em texto puro pode ser interceptado. Migrar para alternativas seguras (HTTPS, SFTP/SSH, SMBv3) e desativar LLMNR/NBT-NS.' }
-                $linhas = @($phs -split "`n" | Where-Object { $_ -match '\S' -and $_ -notmatch '====|Protocol Hierarchy|frames:' } | Select-Object -First 40 | ForEach-Object { [pscustomobject]@{ 'Hierarquia de protocolos (tshark)' = ($_.TrimEnd()) } })
-                Add-Tabela $R 'Protocolos observados na captura (tshark -z io,phs)' $linhas
+                if ($claros.Count) { Add-Achado $R 'Segurança' 'Médio' ("Protocolos sem criptografia/legados vistos no tráfego: {0}." -f (($claros | Select-Object -Unique) -join ', ')) 'Tráfego em texto puro pode ser interceptado na rede. Migrar para HTTPS, SFTP/SSH e SMBv3; desativar LLMNR/NBT-NS.' }
+                $linhas = @($phs -split "`n" | Where-Object { $_ -match '\S' -and $_ -notmatch '====|Protocol Hierarchy' } | Select-Object -First 40 | ForEach-Object { [pscustomobject]@{ 'Hierarquia de protocolos (tshark -z io,phs)' = ($_.TrimEnd()) } })
+                Add-Tabela $R 'Protocolos observados na captura' $linhas
             }
-            elseif ($R.Extra.Captura) { Add-Item $R 'Análise da captura' 'Arquivo salvo para abrir manualmente no Wireshark (tshark não instalado para análise automática)' 'Info' }
+            else { Add-Item $R 'Análise da captura' 'pcapng salvo na pasta do relatório para abrir no Wireshark (instale o Wireshark para análise automática com tshark)' 'Info' }
         }
-        else { Add-Item $R 'Captura de pacotes' 'Não executada: pktmon indisponível (Windows anterior ao 10 1809/Server 2019) e Wireshark/tshark não instalado' 'Atenção' }
+        elseif (-not $dumpcap -and -not $pktmon) { Add-Item $R 'Captura de pacotes' 'Não executada: instale o Wireshark (recomendado) ou use Windows 10 1809+/Server 2019+ (pktmon nativo)' 'Atenção' }
     }
     else { Add-Item $R 'Captura de pacotes' 'Não executada (opção desmarcada)' }
     $R
