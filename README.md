@@ -70,9 +70,30 @@ Cada auditoria gera uma pasta com o PDF, o `relatorio.html`, o `evidencias.json`
 
 Para gerar localmente: `build\Compilar.ps1` (o instalador exige o [Inno Setup 6](https://jrsoftware.org/isdl.php)). Para usar o seu ícone, coloque um `assets\icone.ico`.
 
+## Versão Linux / QNAP (auditoria de NAS e servidores)
+Há também o **`linux/auditor-linux.sh`**, que audita servidores Linux e NAS QNAP (QTS) e gera um relatório HTML com as mesmas notas de desempenho e segurança. Ele só lê informações — não altera nada.
+
+Verifica: sistema e firmware, CPU e carga, memória, discos e **SMART**, **RAID** (degradado), espaço em disco, rede e portas abertas, **SSH** (login de root, senha, porta), usuários (UID 0, contas sem senha, conta `admin` padrão do QNAP), firewall, Telnet/UPnP e atualizações.
+
+### Como auditar um QNAP
+1. No QTS, ative o SSH: **Painel de Controle > Rede e Serviços de Arquivo > Telnet/SSH > Permitir conexão SSH** (anote a porta, normalmente 22).
+2. Envie o script para o NAS — pelo **File Station** (envie `auditor-linux.sh` para uma pasta, ex.: `Public`) ou por linha de comando:
+   ```bash
+   scp linux/auditor-linux.sh admin@IP_DO_NAS:/share/Public/
+   ```
+3. Conecte por SSH como administrador e rode:
+   ```bash
+   ssh admin@IP_DO_NAS -p 22
+   sh /share/Public/auditor-linux.sh -c "Nome do cliente" -t "Samuel"
+   ```
+4. Baixe o arquivo `Relatorio_Auditoria_Linux_*.html` gerado (pelo File Station) e abra no navegador do seu PC. Para virar PDF com o seu papel timbrado, use Ctrl+P > Salvar como PDF (ou passe `-l timbrado.png` ao rodar).
+
+Em qualquer servidor Linux comum, é só rodar `sudo sh auditor-linux.sh -c "Cliente"`. Rodar como root/admin dá a análise completa.
+
 ## Estrutura
 ```
-src/AuditorTI.ps1        programa (PowerShell + interface Windows Forms)
+src/AuditorTI.ps1        programa Windows (PowerShell + interface)
+linux/auditor-linux.sh   auditor para Linux e NAS QNAP (relatório HTML)
 run.ps1                  execução direta pelo GitHub
 Executar.bat             executa o script sem o .exe
 build/Compilar.ps1       gera exe, zip portátil e instalador

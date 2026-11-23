@@ -1,0 +1,51 @@
+name: Auditor Linux/QNAP
+
+on:
+  push:
+    branches: [main]
+    paths: ['linux/**', '.github/workflows/linux.yml']
+  workflow_dispatch:
+
+jobs:
+  testar-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar shells e ferramentas
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq dash busybox-static shellcheck smartmontools
+
+      - name: Verificar sintaxe (sh, dash, busybox)
+        run: |
+          sh -n linux/auditor-linux.sh && echo "sh OK"
+          dash -n linux/auditor-linux.sh && echo "dash OK"
+          busybox sh -n linux/auditor-linux.sh && echo "busybox OK"
+
+      - name: shellcheck (apenas erros)
+        run: shellcheck -S error linux/auditor-linux.sh && echo "shellcheck OK"
+
+      - name: Rodar a auditoria (dash)
+        run: |
+          dash linux/auditor-linux.sh -c "Teste CI" -t "GitHub" -o out
+          rel=$(ls out/Relatorio_Auditoria_Linux_*.html 2>/dev/null | head -1)
+          if [ -z "$rel" ]; then echo "Relatorio nao gerado"; exit 1; fi
+          grep -q "Nota de seguranca" "$rel" || { echo "Relatorio sem notas"; exit 1; }
+          grep -q "SHA-256" "$rel" || { echo "Relatorio sem hash"; exit 1; }
+          echo "Relatorio dash OK: $rel ($(wc -c < "$rel") bytes)"
+
+      - name: Rodar a auditoria (busybox sh, como no QNAP)
+        run: |
+          busybox sh linux/auditor-linux.sh -c "Teste QNAP" -t "GitHub" -o out2
+          rel=$(ls out2/Relatorio_Auditoria_Linux_*.html 2>/dev/null | head -1)
+          if [ -z "$rel" ]; then echo "Relatorio (busybox) nao gerado"; exit 1; fi
+          grep -q "Nota de desempenho" "$rel" || { echo "Relatorio (busybox) sem notas"; exit 1; }
+          echo "Relatorio busybox OK: $rel"
+
+      - name: Guardar relatorios de teste
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auditoria-linux
+          path: |
+            out/
+            out2/
