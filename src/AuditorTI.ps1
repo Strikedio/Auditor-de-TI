@@ -19,7 +19,7 @@ param(
     [string]$Corrigir = ''      # (sem interface) ids dos reparos, separados por vírgula
 )
 
-$Global:VersaoApp = '1.3.0'
+$Global:VersaoApp = '1.4.0'
 $ErrorActionPreference = 'Continue'
 try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop } catch {}
 
@@ -546,13 +546,14 @@ public static class AuditorMem {
 }}
 
 # ---------------------------------------------------------------------
-@{ Id = 'disco'; Nome = 'Discos e armazenamento'; Timeout = 420
-   Desc = 'Tipo (SSD/HDD), saúde SMART, temperatura, desgaste, erros, espaço livre por unidade, arquivos temporários e teste de velocidade (opcional).'
+@{ Id = 'disco'; Nome = 'Discos e armazenamento'; Timeout = 1800
+   Desc = 'Todos os discos físicos: tipo (SSD/HDD), saúde e atributos S.M.A.R.T. detalhados, espaço livre por unidade, arquivos temporários e leitura real de cada disco (amostrada ou completa, setor por setor).'
    Codigo = {
     $R = New-R
     Log 'Inventariando discos físicos e saúde SMART...'
     $sysNum = $null
     try { $sysNum = (Get-Partition -DriveLetter ($env:SystemDrive.TrimEnd(':')) -ErrorAction Stop | Select-Object -First 1).DiskNumber } catch {}
+    $R.Metricas.NumSistema = $sysNum
     $fp = @(); try { $fp = @(Get-CimInstance -Namespace root\wmi -ClassName MSStorageDriver_FailurePredictStatus -ErrorAction Stop | Where-Object { $_.PredictFailure }) } catch {}
     if ($fp.Count) {
         Add-Item $R 'Alerta SMART de falha iminente' 'SIM - o disco prevê falha' 'Crítico'
@@ -663,42 +664,103 @@ public static class AuditorMem {
     if ($tmpTot -gt 5GB) { Add-Achado $R 'Desempenho' 'Baixo' ("{0} GB em arquivos temporários." -f (GB $tmpTot)) 'Executar a Limpeza de Disco / Sensor de Armazenamento.' 0.2 }
 
     if ($Cfg.TesteDisco) {
-        $letra = $env:SystemDrive.TrimEnd(':')
-        $winsat = "$env:windir\System32\winsat.exe"
-        function Get-WinsatMB([string]$a) {
-            $o = Invoke-Cmd $winsat "disk $a -drive $letra" 180000
-            $m = [regex]::Matches($o, '([\d]+[\.,]?[\d]*)\s*MB/s')
-            if ($m.Count) { return [math]::Round([double]($m[$m.Count - 1].Groups[1].Value -replace ',', '.'), 0) }
-            return $null
-        }
-        Log 'Teste de velocidade: leitura sequencial...'
-        $leit = Get-WinsatMB '-seq -read'
-        Log 'Teste de velocidade: escrita sequencial...'
-        $esc = Get-WinsatMB '-seq -write'
-        Log 'Teste de velocidade: leitura aleatória 4K...'
-        $ran = Get-WinsatMB '-ran -read'
-        if (-not $esc) {
-            Log 'winsat indisponível - executando teste de escrita próprio (512 MB)...'
-            $f = Join-Path $env:TEMP 'auditorti_velocidade.tmp'
+        # Leitura real de CADA disco físico pelo dispositivo bruto (\\.\PhysicalDriveN).
+        # 'amostrado' percorre o disco inteiro em ~200 pontos; 'completo' lê todos os setores.
+        $completo = [bool]$Cfg.LeituraCompleta
+        function Read-DiscoBruto([int]$numero, [int64]$tamanho, [bool]$full) {
+            $r = @{ Lido = [int64]0; Erros = (New-Object System.Collections.ArrayList); Velos = (New-Object System.Collections.ArrayList); MinMB = $null; MaxMB = 0.0; MedMB = $null; Cancelado = $false; Falha = $null }
+            if (-not $tamanho -or $tamanho -lt 1MB) { $r.Falha = 'tamanho do disco desconhecido'; return $r }
+            $bloco = [int]8MB
+            try { $fs = New-Object IO.FileStream("\\.\PhysicalDrive$numero", [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite) }
+            catch { $r.Falha = $_.Exception.Message; return $r }
+            $buf = New-Object byte[] $bloco
             try {
-                $buf = New-Object byte[] (8MB); (New-Object Random).NextBytes($buf)
-                $sw = [Diagnostics.Stopwatch]::StartNew()
-                $fs = New-Object IO.FileStream($f, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None, 1MB, [IO.FileOptions]::WriteThrough)
-                for ($i = 0; $i -lt 64; $i++) { $fs.Write($buf, 0, $buf.Length) }
-                $fs.Flush($true); $fs.Close(); $sw.Stop()
-                $esc = [math]::Round(512 / $sw.Elapsed.TotalSeconds, 0)
-            } catch {} finally { Remove-Item $f -Force -ErrorAction SilentlyContinue }
+                if ($full) {
+                    $pos = [int64]0; $prox = 0
+                    while ($pos -lt $tamanho) {
+                        if ($Sync.Cancelar) { $r.Cancelado = $true; break }
+                        $ler = [int][math]::Min([int64]$bloco, $tamanho - $pos); $ler = $ler - ($ler % 4096)
+                        if ($ler -le 0) { break }
+                        try {
+                            $fs.Position = $pos
+                            $sw = [Diagnostics.Stopwatch]::StartNew(); $n = $fs.Read($buf, 0, $ler); $sw.Stop()
+                            if ($n -le 0) { break }
+                            $mb = ($n / 1MB) / [math]::Max(0.0001, $sw.Elapsed.TotalSeconds)
+                            [void]$r.Velos.Add($mb); if ($mb -gt $r.MaxMB) { $r.MaxMB = $mb }; if ($null -eq $r.MinMB -or $mb -lt $r.MinMB) { $r.MinMB = $mb }
+                            $r.Lido += $n; $pos += $n
+                        } catch { [void]$r.Erros.Add($pos); $pos += $bloco }
+                        $pct = [int]($pos * 100 / $tamanho)
+                        if ($pct -ge $prox) { Log ("    disco {0}: {1}% ({2:N0} GB de {3:N0} GB) - {4} erro(s) de leitura" -f $numero, $pct, ($pos / 1GB), ($tamanho / 1GB), $r.Erros.Count); $prox += 2 }
+                    }
+                }
+                else {
+                    $amostras = 200
+                    for ($i = 0; $i -lt $amostras; $i++) {
+                        if ($Sync.Cancelar) { $r.Cancelado = $true; break }
+                        $pos = [int64]([double]$i * $tamanho / $amostras); $pos = $pos - ($pos % 4096)
+                        if ($pos + $bloco -gt $tamanho) { $pos = $tamanho - $bloco - (($tamanho - $bloco) % 4096) }
+                        if ($pos -lt 0) { $pos = 0 }
+                        try {
+                            $fs.Position = $pos
+                            $sw = [Diagnostics.Stopwatch]::StartNew(); $n = $fs.Read($buf, 0, $bloco); $sw.Stop()
+                            if ($n -le 0) { continue }
+                            $mb = ($n / 1MB) / [math]::Max(0.0001, $sw.Elapsed.TotalSeconds)
+                            [void]$r.Velos.Add($mb); if ($mb -gt $r.MaxMB) { $r.MaxMB = $mb }; if ($null -eq $r.MinMB -or $mb -lt $r.MinMB) { $r.MinMB = $mb }
+                            $r.Lido += $n
+                        } catch { [void]$r.Erros.Add($pos) }
+                        if ($i % 40 -eq 0) { Log ("    disco {0}: amostra {1}/{2}" -f $numero, $i, $amostras) }
+                    }
+                }
+            } finally { $fs.Close() }
+            if ($r.Velos.Count) { $r.MedMB = ($r.Velos | Measure-Object -Average).Average }
+            return $r
         }
-        $ref = 'Referência: HDD 80-160 | SSD SATA 400-550 | NVMe 1.500-7.000 MB/s'
-        if ($leit) { Add-Item $R 'Leitura sequencial' "$leit MB/s ($ref)" $(if ($leit -lt 200) { 'Atenção' } else { 'OK' }) }
-        if ($esc) { Add-Item $R 'Escrita sequencial' "$esc MB/s" $(if ($esc -lt 150) { 'Atenção' } else { 'OK' }) }
-        if ($ran) { Add-Item $R 'Leitura aleatória (4K)' "$ran MB/s" $(if ($ran -lt 10) { 'Atenção' } else { 'OK' }) }
-        $R.Metricas.Leitura = $leit; $R.Metricas.Escrita = $esc
-        if ($leit -and $leit -lt 200 -and $R.Metricas.TipoSistema -ne 'HDD') {
-            Add-Achado $R 'Desempenho' 'Médio' "Velocidade de leitura do disco do sistema baixa ($leit MB/s)." 'Verificar se o SSD está no modo AHCI/NVMe, atualizar firmware/driver e avaliar substituição.' 0.5
+
+        $modoTxt = if ($completo) { 'completa (todos os setores)' } else { 'amostrada (200 pontos ao longo do disco)' }
+        Log ("Leitura {0} dos discos físicos..." -f $modoTxt)
+        $tLeit = New-Object System.Collections.ArrayList
+        $fis = @(Get-PhysicalDisk | Where-Object { [string]$_.BusType -notin @('7', 'USB') -or $completo })
+        foreach ($pd in @(Get-PhysicalDisk | Sort-Object DeviceId)) {
+            $num = [int]$pd.DeviceId
+            $bt = [string]$pd.BusType; if ($bt -eq '17') { $bt = 'NVMe' } elseif ($bt -eq '11') { $bt = 'SATA' } elseif ($bt -eq '7') { $bt = 'USB' } elseif ($bt -eq '8') { $bt = 'RAID' }
+            Log ("  Lendo disco {0}: {1} ({2} GB)..." -f $num, $pd.FriendlyName, (GB $pd.Size))
+            $rd = Read-DiscoBruto $num ([int64]$pd.Size) $completo
+            if ($rd.Falha) { Add-Item $R ("Leitura do disco {0} ({1})" -f $num, $pd.FriendlyName) ("Não foi possível ler: {0}" -f $rd.Falha) 'Atenção'; continue }
+            $med = if ($null -ne $rd.MedMB) { [math]::Round($rd.MedMB, 0) } else { 0 }
+            $mn = if ($null -ne $rd.MinMB) { [math]::Round($rd.MinMB, 0) } else { 0 }
+            $mx = [math]::Round($rd.MaxMB, 0)
+            $nErr = $rd.Erros.Count
+            $gb = [math]::Round($rd.Lido / 1GB, 2)
+            $cobertura = if ($completo) { "$gb GB (100% - setor por setor)" } else { "$gb GB (amostragem ao longo de $(GB $pd.Size) GB)" }
+            $stat = if ($nErr -gt 0) { 'Crítico' } elseif ($med -gt 0 -and $med -lt 80 -and $bt -ne 'USB') { 'Atenção' } elseif ($rd.Cancelado) { 'Atenção' } else { 'OK' }
+            $txt = ("Média {0} MB/s (mín {1} / máx {2}) | lido {3}{4} | {5} erro(s) de leitura{6}" -f $med, $mn, $mx, $cobertura, '', $nErr, $(if ($rd.Cancelado) { ' | CANCELADO' } else { '' }))
+            Add-Item $R ("Leitura do disco {0}: {1} [{2}]" -f $num, $pd.FriendlyName, $bt) $txt $stat
+            [void]$tLeit.Add([pscustomobject]@{
+                'Disco' = "$num - $($pd.FriendlyName)"; 'Interface' = $bt; 'Tamanho (GB)' = GB $pd.Size
+                'Modo' = $(if ($completo) { 'Completo' } else { 'Amostrado' }); 'Lido (GB)' = $gb
+                'Vel. média (MB/s)' = $med; 'Mínima' = $mn; 'Máxima' = $mx; 'Erros de leitura' = $nErr
+            })
+            if ($num -eq 0 -or ([string]$pd.DeviceId -eq [string]$R.Metricas.NumSistema)) { $R.Metricas.LeituraSistema = $med }
+            if ($nErr -gt 0) {
+                $locais = (($rd.Erros | Select-Object -First 5 | ForEach-Object { "{0:N1} GB" -f ($_ / 1GB) }) -join ', ')
+                Add-Achado $R 'Desempenho' 'Crítico' ("Disco {0} ({1}) com {2} erro(s) de leitura (setores defeituosos) - ex.: {3}." -f $num, $pd.FriendlyName, $nErr, $locais) 'Fazer backup IMEDIATO. Setores ilegíveis indicam disco em falha física. Rodar chkdsk /r e substituir o disco.' 3 -Upgrade
+            }
+            if ($nErr -eq 0 -and $med -gt 0 -and $med -lt 80 -and $bt -in @('SATA', 'RAID')) {
+                Add-Achado $R 'Desempenho' 'Médio' ("Disco {0} ({1}) com leitura média baixa ({2} MB/s)." -f $num, $pd.FriendlyName, $med) 'Verificar cabo/porta SATA, fragmentação (HDD), saúde do disco e modo AHCI. Se for o disco do sistema, considerar SSD.' 0.5
+            }
         }
+        Add-Tabela $R ("Leitura dos discos ({0})" -f $modoTxt) $tLeit
+
+        # Latência aleatória 4K no disco do sistema (importante para SSD)
+        $letra = $env:SystemDrive.TrimEnd(':')
+        $ran = $null
+        $o = Invoke-Cmd "$env:windir\System32\winsat.exe" "disk -ran -read -drive $letra" 180000
+        $m = [regex]::Matches($o, '([\d]+[\.,]?[\d]*)\s*MB/s')
+        if ($m.Count) { $ran = [math]::Round([double]($m[$m.Count - 1].Groups[1].Value -replace ',', '.'), 1) }
+        if ($ran) { Add-Item $R 'Leitura aleatória 4K (disco do sistema)' "$ran MB/s" $(if ($ran -lt 10) { 'Atenção' } else { 'OK' }) }
+        Add-Item $R 'Modo do teste de leitura' $modoTxt 'Info'
     }
-    else { Add-Item $R 'Teste de velocidade' 'Não executado (opção desmarcada)' }
+    else { Add-Item $R 'Teste de leitura dos discos' 'Não executado (opção desmarcada)' }
     $R
 }}
 
@@ -2091,7 +2153,7 @@ function Save-Config {
     try {
         New-Item -ItemType Directory -Path $Global:CfgDir -Force | Out-Null
         @{ Tecnico = $txtTecnico.Text; Timbrado = $Global:Timbrado; Topo = [int]$nudTopo.Value; Base = [int]$nudBase.Value; Lado = [int]$nudLado.Value
-           Disco = $chkDisco.Checked; Memoria = $chkMemoria.Checked; WU = $chkWU.Checked; Winget = $chkWinget.Checked; Som = $chkSom.Checked } | ConvertTo-Json | Set-Content -Path $Global:CfgArq -Encoding UTF8
+           Disco = $chkDisco.Checked; Leitura = $chkLeitura.Checked; Memoria = $chkMemoria.Checked; WU = $chkWU.Checked; Winget = $chkWinget.Checked; Som = $chkSom.Checked } | ConvertTo-Json | Set-Content -Path $Global:CfgArq -Encoding UTF8
     } catch {}
 }
 
@@ -2571,7 +2633,7 @@ function Set-BotoesAcao([bool]$ativo) {
 
 # Executa um lote mostrando o andamento na janela
 function Invoke-Lote([string]$Titulo, $Codigo, [int]$Timeout, $Selecao) {
-    $Global:Rodando = $true; $Global:Cancelar = $false
+    $Global:Rodando = $true; $Global:Cancelar = $false; $Global:Sync['Cancelar'] = $false
     Set-BotoesAcao $false
     $prog.Style = 'Marquee'
     $Global:StatusBase = "Executando: $Titulo"
@@ -2656,7 +2718,7 @@ function Show-Ativacao {
 #   AuditorTI.ps1 -SemInterface -Cliente "Nome" [-Timbrado arquivo.png] [-Saida pasta]
 # ---------------------------------------------------------------------
 if ($SemInterface) {
-    $Global:Cfg.TesteDisco = $true; $Global:Cfg.TesteMemoria = $true; $Global:Cfg.BuscarWU = $false; $Global:Cfg.Winget = $true; $Global:Cfg.TesteSom = $false
+    $Global:Cfg.TesteDisco = $true; $Global:Cfg.LeituraCompleta = $false; $Global:Cfg.TesteMemoria = $true; $Global:Cfg.BuscarWU = $false; $Global:Cfg.Winget = $true; $Global:Cfg.TesteSom = $false
     if ($Saida) { $Global:PastaRelatorios = $Saida }
     $Global:Inicio = Get-Date
     $Global:IdAud = 'AUD-{0}-{1}' -f $Global:Inicio.ToString('yyyyMMdd-HHmm'), ([guid]::NewGuid().ToString('N').Substring(0, 4).ToUpper())
@@ -2727,13 +2789,15 @@ $lt2 = New-Ctl Label 104 ($y + 22) 50 18 'Rodapé'; $nudBase = New-Ctl NumericUp
 $lt3 = New-Ctl Label 208 ($y + 22) 46 18 'Lados'; $nudLado = New-Ctl NumericUpDown 252 ($y + 19) 48 24
 foreach ($nu in @($nudTopo, $nudBase, $nudLado)) { $nu.Minimum = 5; $nu.Maximum = 120 }
 $nudTopo.Value = 40; $nudBase.Value = 28; $nudLado.Value = 18; $y += 54
-$grp = New-Ctl GroupBox 12 $y 290 140 'Opções'
-$chkDisco = New-Ctl CheckBox 10 20 275 20 'Teste de velocidade do disco (~1-2 min)'; $chkDisco.Checked = $true
-$chkMemoria = New-Ctl CheckBox 10 43 275 20 'Teste de integridade da RAM (~1 min)'; $chkMemoria.Checked = $true
-$chkWU = New-Ctl CheckBox 10 66 275 20 'Buscar atualizações pendentes do Windows'; $chkWU.Checked = $true
-$chkWinget = New-Ctl CheckBox 10 89 275 20 'Verificar atualizações de programas (winget)'; $chkWinget.Checked = $true
-$chkSom = New-Ctl CheckBox 10 112 275 20 'Teste audível de som (tocar tom)'; $chkSom.Checked = $true
-$grp.Controls.AddRange(@($chkDisco, $chkMemoria, $chkWU, $chkWinget, $chkSom)); $y += 148
+$grp = New-Ctl GroupBox 12 $y 290 164 'Opções'
+$chkDisco = New-Ctl CheckBox 10 20 275 20 'Teste de leitura dos discos (todos)'; $chkDisco.Checked = $true
+$chkLeitura = New-Ctl CheckBox 24 42 262 18 'Leitura completa, setor por setor (lento!)'; $chkLeitura.Checked = $false; $chkLeitura.Font = New-Object Drawing.Font('Segoe UI', 8)
+$chkMemoria = New-Ctl CheckBox 10 64 275 20 'Teste de integridade da RAM (~1 min)'; $chkMemoria.Checked = $true
+$chkWU = New-Ctl CheckBox 10 87 275 20 'Buscar atualizações pendentes do Windows'; $chkWU.Checked = $true
+$chkWinget = New-Ctl CheckBox 10 110 275 20 'Atualizações de programas (winget)'; $chkWinget.Checked = $true
+$chkSom = New-Ctl CheckBox 10 133 275 20 'Teste audível de som (tocar tom)'; $chkSom.Checked = $true
+$chkDisco.Add_CheckedChanged({ $chkLeitura.Enabled = $chkDisco.Checked })
+$grp.Controls.AddRange(@($chkDisco, $chkLeitura, $chkMemoria, $chkWU, $chkWinget, $chkSom)); $y += 172
 $l6 = New-Ctl Label 12 $y 290 18 'Testes a executar'
 $clb = New-Ctl CheckedListBox 12 ($y + 18) 288 150; $clb.CheckOnClick = $true; $clb.IntegralHeight = $false
 foreach ($t in $Global:Testes) { $i = $clb.Items.Add($t.Nome); $clb.SetItemChecked($i, $true) }
@@ -2789,6 +2853,8 @@ if (Test-Path $Global:CfgArq) {
         if ($c.Lado) { $nudLado.Value = [math]::Min(120, [math]::Max(5, [int]$c.Lado)) }
         if ($null -ne $c.Disco) { $chkDisco.Checked = [bool]$c.Disco; $chkWU.Checked = [bool]$c.WU; $chkWinget.Checked = [bool]$c.Winget; $chkSom.Checked = [bool]$c.Som }
         if ($null -ne $c.Memoria) { $chkMemoria.Checked = [bool]$c.Memoria }
+        if ($null -ne $c.Leitura) { $chkLeitura.Checked = [bool]$c.Leitura }
+        $chkLeitura.Enabled = $chkDisco.Checked
     } catch {}
 }
 
@@ -2839,13 +2905,20 @@ $btnIniciar.Add_Click({
     $sel = @(); for ($i = 0; $i -lt $Global:Testes.Count; $i++) { if ($clb.GetItemChecked($i)) { $sel += $Global:Testes[$i] } }
     if (-not $sel.Count) { [System.Windows.Forms.MessageBox]::Show($form, 'Selecione ao menos um teste.', 'AuditorTI', 'OK', 'Information') | Out-Null; return }
     Save-Config
+    if ($chkDisco.Checked -and $chkLeitura.Checked -and ($sel.Id -contains 'disco')) {
+        $totGB = [math]::Round((@(Get-PhysicalDisk | Where-Object { [string]$_.BusType -ne '7' } | Measure-Object Size -Sum).Sum) / 1GB, 0)
+        $horas = [math]::Round($totGB / 110 / 60, 1)
+        $tDisco = $Global:Testes | Where-Object { $_.Id -eq 'disco' } | Select-Object -First 1
+        if ($tDisco) { $tDisco.Timeout = [int][math]::Max(1800, $totGB / 110 * 60 * 3) }
+        if ([System.Windows.Forms.MessageBox]::Show($form, "A leitura COMPLETA (setor por setor) de ~$totGB GB pode levar cerca de $horas hora(s). O computador pode ser usado durante o teste, mas ficará mais lento." + [Environment]::NewLine + [Environment]::NewLine + 'Deseja continuar com a leitura completa? (Não = leitura amostrada, rápida)', 'Leitura completa dos discos', 'YesNoCancel', 'Warning') -eq 'No') { $chkLeitura.Checked = $false }
+    }
     $manter = [bool]$Global:ManterAcoes; $Global:ManterAcoes = $false
     if (-not $manter -and ($Global:Acoes.Count -or $Global:Lotes.Count)) {
         $manter = ([System.Windows.Forms.MessageBox]::Show($form, 'Há manutenções/alterações registradas nesta sessão.' + [Environment]::NewLine + 'Manter esse registro no relatório da nova auditoria? (Sim = mesmo cliente / Não = novo cliente)', 'AuditorTI', 'YesNo', 'Question') -eq 'Yes')
     }
-    $Global:Rodando = $true; $Global:Cancelar = $false
+    $Global:Rodando = $true; $Global:Cancelar = $false; $Global:Sync['Cancelar'] = $false
     Set-BotoesAcao $false; $btnPasta.Enabled = $false
-    $Global:Cfg.TesteDisco = $chkDisco.Checked; $Global:Cfg.TesteMemoria = $chkMemoria.Checked; $Global:Cfg.BuscarWU = $chkWU.Checked; $Global:Cfg.Winget = $chkWinget.Checked; $Global:Cfg.TesteSom = $chkSom.Checked
+    $Global:Cfg.TesteDisco = $chkDisco.Checked; $Global:Cfg.LeituraCompleta = ($chkDisco.Checked -and $chkLeitura.Checked); $Global:Cfg.TesteMemoria = $chkMemoria.Checked; $Global:Cfg.BuscarWU = $chkWU.Checked; $Global:Cfg.Winget = $chkWinget.Checked; $Global:Cfg.TesteSom = $chkSom.Checked
     $Global:Resultados.Clear(); $Global:Prints.Clear(); $txtLog.Clear(); $dgv.Rows.Clear()
     if (-not $manter) { $Global:Acoes.Clear(); $Global:Lotes.Clear(); $Global:LogGeral.Clear() }
     foreach ($it in $lv.Items) { $it.SubItems[1].Text = $(if ($sel.Id -contains $it.Tag) { 'Aguardando' } else { 'Não executado' }); $it.SubItems[2].Text = ''; $it.SubItems[3].Text = ''; $it.BackColor = [Drawing.Color]::White }
@@ -2898,7 +2971,7 @@ $form.Add_FormClosing({
     if ($Global:Rodando) {
         $r = [System.Windows.Forms.MessageBox]::Show($form, 'Há uma tarefa em andamento. Deseja interromper e sair?' + [Environment]::NewLine + '(Reparos como DISM/SFC já iniciados continuam rodando em segundo plano até terminar.)', 'AuditorTI', 'YesNo', 'Warning')
         $e.Cancel = $true
-        if ($r -eq 'Yes') { $Global:Cancelar = $true; $Global:FecharApos = $true }
+        if ($r -eq 'Yes') { $Global:Cancelar = $true; $Global:Sync['Cancelar'] = $true; $Global:FecharApos = $true }
     }
 })
 
