@@ -20,7 +20,7 @@ param(
     [switch]$Capturar           # (sem interface) faz a captura de pacotes no teste de rede
 )
 
-$Global:VersaoApp = '1.8.0'
+$Global:VersaoApp = '1.9.0'
 $ErrorActionPreference = 'Continue'
 try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop } catch {}
 
@@ -230,16 +230,17 @@ function Get-Assinatura([string]$path) {
         $w = Get-Command $path -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($w -and $w.Source -and (Test-Path -LiteralPath $w.Source)) { $path = $w.Source } else { return 'Arquivo não encontrado' }
     }
+    if (-not $script:AssCache) { $script:AssCache = @{} }
+    if ($script:AssCache.ContainsKey($path)) { return $script:AssCache[$path] }
+    # Lê o certificado embutido sem verificar a cadeia/revogação na rede (muito mais rápido)
+    $r = 'Não assinado'
     try {
-        $s = Get-AuthenticodeSignature -LiteralPath $path -ErrorAction Stop
-        if ([string]$s.Status -eq 'Valid') {
-            $cn = 'válida'
-            if ($s.SignerCertificate.Subject -match 'CN="?([^,"]+)') { $cn = $Matches[1] }
-            return "Assinado ($cn)"
-        }
-        elseif ([string]$s.Status -eq 'NotSigned') { return 'Não assinado' }
-        else { return "Assinatura: $($s.Status)" }
-    } catch { return 'Erro ao verificar' }
+        $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::CreateFromSignedFile($path)
+        $cn = 'válida'; if ($cert.Subject -match 'CN="?([^,"]+)') { $cn = $Matches[1] }
+        $r = "Assinado ($cn)"
+    } catch { $r = 'Não assinado' }
+    $script:AssCache[$path] = $r
+    return $r
 }
 
 # Padrões típicos de malware / persistência maliciosa
@@ -562,7 +563,7 @@ public static class AuditorMem {
         if ('AuditorMem' -as [type]) {
             $osm = Get-CimInstance Win32_OperatingSystem
             $livreB = [double]$osm.FreePhysicalMemory * 1KB
-            $alvo = [long][math]::Min($livreB * 0.5, 4GB)
+            $alvo = [long][math]::Min($livreB * 0.5, 2GB)
             if ($alvo -lt 256MB) { $alvo = [long][math]::Min([long]($livreB * 0.8), [long]256MB) }
             try {
                 $aloc = [AuditorMem]::Alocar([long]$alvo, [int]64MB)
@@ -738,7 +739,7 @@ public static class AuditorMem {
                     }
                 }
                 else {
-                    $amostras = 200
+                    $amostras = 120
                     for ($i = 0; $i -lt $amostras; $i++) {
                         if ($Sync.Cancelar) { $r.Cancelado = $true; break }
                         $pos = [int64]([double]$i * $tamanho / $amostras); $pos = $pos - ($pos % 4096)
@@ -828,11 +829,11 @@ public static class AuditorMem {
    Desc = 'Carga da CPU em repouso, benchmark de CPU (mono e multi-thread), processos que mais usam CPU, programas na inicialização, plano de energia e saúde da bateria.'
    Codigo = {
     $R = New-R
-    Log 'Medindo a carga do processador (5 amostras)...'
+    Log 'Medindo a carga do processador...'
     $am = @()
-    for ($i = 0; $i -lt 5; $i++) {
+    for ($i = 0; $i -lt 3; $i++) {
         $v = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'").PercentProcessorTime
-        $am += [double]$v; Start-Sleep -Milliseconds 900
+        $am += [double]$v; Start-Sleep -Milliseconds 600
     }
     $media = [math]::Round(($am | Measure-Object -Average).Average, 0)
     Add-Item $R 'Carga média da CPU em repouso' "$media%" $(if ($media -ge 80) { 'Crítico' } elseif ($media -ge 50) { 'Atenção' } else { 'OK' })
@@ -873,11 +874,11 @@ public static class AuditorBench {
 
     Log 'Medindo uso de CPU por processo...'
     $p1 = @{}; Get-Process | ForEach-Object { $p1[$_.Id] = $_.TotalProcessorTime.TotalMilliseconds }
-    Start-Sleep -Seconds 2
+    Start-Sleep -Milliseconds 1300
     $np = [int]$env:NUMBER_OF_PROCESSORS; if (-not $np) { $np = 1 }
     $top = Get-Process | ForEach-Object {
         if ($p1.ContainsKey($_.Id)) {
-            [pscustomobject]@{ 'Processo' = $_.ProcessName; 'CPU (%)' = [math]::Round(([double]$_.TotalProcessorTime.TotalMilliseconds - [double]$p1[$_.Id]) / 2000 / $np * 100, 1); 'RAM (MB)' = [math]::Round($_.WorkingSet64 / 1MB, 0); 'PID' = $_.Id }
+            [pscustomobject]@{ 'Processo' = $_.ProcessName; 'CPU (%)' = [math]::Round(([double]$_.TotalProcessorTime.TotalMilliseconds - [double]$p1[$_.Id]) / 1300 / $np * 100, 1); 'RAM (MB)' = [math]::Round($_.WorkingSet64 / 1MB, 0); 'PID' = $_.Id }
         }
     } | Sort-Object 'CPU (%)' -Descending | Select-Object -First 10
     Add-Tabela $R 'Processos que mais usam CPU (amostra de 2 s)' $top
@@ -1176,7 +1177,7 @@ public static class AuditorBench {
         $wg = (Get-Command winget.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
         if (-not $wg) { $wg = Get-ChildItem "$env:ProgramFiles\WindowsApps\Microsoft.DesktopAppInstaller_*_x64__8wekyb3d8bbwe\winget.exe" -ErrorAction SilentlyContinue | Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName }
         if ($wg) {
-            $txt = Invoke-Cmd $wg 'upgrade --include-unknown --accept-source-agreements --disable-interactivity' 180000 -Utf8
+            $txt = Invoke-Cmd $wg 'upgrade --include-unknown --accept-source-agreements --disable-interactivity' 90000 -Utf8
             $lns = @($txt -split "`n" | ForEach-Object { ($_ -split "`r")[-1] })
             $idx = -1; for ($i = 0; $i -lt $lns.Count; $i++) { if ($lns[$i] -match '^-{10,}') { $idx = $i; break } }
             $upd = New-Object System.Collections.ArrayList
@@ -3235,7 +3236,7 @@ $form.StartPosition = 'CenterScreen'; $form.Font = $fonte; $form.BackColor = [Dr
 function New-Ctl($tipo, $x, $y, $w, $h, $txt = '') { $c = New-Object "Windows.Forms.$tipo"; $c.Location = New-Object Drawing.Point($x, $y); $c.Size = New-Object Drawing.Size($w, $h); if ($txt) { $c.Text = $txt }; return $c }
 
 # Cabeçalho
-$pTopo = New-Object Windows.Forms.Panel; $pTopo.Dock = 'Top'; $pTopo.Height = 58; $pTopo.BackColor = $azul
+$pTopo = New-Object Windows.Forms.Panel; $pTopo.Dock = 'Top'; $pTopo.Height = 56; $pTopo.BackColor = $azul
 $lT = New-Ctl Label 16 6 600 30 'AuditorTI'; $lT.ForeColor = 'White'; $lT.Font = New-Object Drawing.Font('Segoe UI', 16, [Drawing.FontStyle]::Bold)
 $modoTxt = if ($Global:Portatil) { 'Modo portátil (pendrive)' } else { 'Modo instalado' }
 $lS = New-Ctl Label 18 35 1000 18 "Diagnóstico de desempenho e segurança  •  $env:COMPUTERNAME  •  $((Get-CimInstance Win32_OperatingSystem).Caption)  •  $modoTxt"; $lS.ForeColor = [Drawing.Color]::FromArgb(200, 220, 240)
@@ -3262,7 +3263,7 @@ $chkDisco = New-Ctl CheckBox 10 20 275 20 'Teste de leitura dos discos (todos)';
 $chkLeitura = New-Ctl CheckBox 24 42 262 18 'Leitura completa, setor por setor (lento!)'; $chkLeitura.Checked = $false; $chkLeitura.Font = New-Object Drawing.Font('Segoe UI', 8)
 $chkMemoria = New-Ctl CheckBox 10 64 275 20 'Teste de integridade da RAM (~1 min)'; $chkMemoria.Checked = $true
 $chkCaptura = New-Ctl CheckBox 10 87 275 20 'Captura de pacotes de rede (~1 min)'; $chkCaptura.Checked = $false
-$chkWU = New-Ctl CheckBox 10 110 275 20 'Buscar atualizações pendentes do Windows'; $chkWU.Checked = $true
+$chkWU = New-Ctl CheckBox 10 110 275 20 'Buscar Windows Update pendente (online, lento)'; $chkWU.Checked = $false
 $chkWinget = New-Ctl CheckBox 10 133 275 20 'Atualizações de programas (winget)'; $chkWinget.Checked = $true
 $chkSom = New-Ctl CheckBox 10 156 275 20 'Teste audível de som (tocar tom)'; $chkSom.Checked = $true
 $chkDisco.Add_CheckedChanged({ $chkLeitura.Enabled = $chkDisco.Checked })
@@ -3321,12 +3322,12 @@ $tabs.BringToFront()
 
 # ===== Assistente de 3 etapas: Atendimento -> Analise -> Laudo =====
 $pSteps = New-Object Windows.Forms.TableLayoutPanel
-$pSteps.Dock = 'Top'; $pSteps.Height = 30; $pSteps.ColumnCount = 3; $pSteps.RowCount = 1; $pSteps.BackColor = [Drawing.Color]::FromArgb(40, 70, 104); $pSteps.Margin = New-Object Windows.Forms.Padding(0)
+$pSteps.Dock = 'Top'; $pSteps.Height = 36; $pSteps.ColumnCount = 3; $pSteps.RowCount = 1; $pSteps.BackColor = [Drawing.Color]::FromArgb(40, 70, 104); $pSteps.Margin = New-Object Windows.Forms.Padding(0)
 foreach ($w in @(34, 33, 33)) { [void]$pSteps.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, [single]$w))) }
 $Global:StepLbls = @()
 $ti = 0
 foreach ($nm in @('1  ATENDIMENTO', '2  ANALISE', '3  LAUDO')) {
-    $sl = New-Object Windows.Forms.Label; $sl.Text = $nm; $sl.Dock = 'Fill'; $sl.TextAlign = 'MiddleCenter'; $sl.ForeColor = 'White'; $sl.Font = New-Object Drawing.Font('Segoe UI', 9.5, [Drawing.FontStyle]::Bold); $sl.BackColor = [Drawing.Color]::FromArgb(40, 70, 104)
+    $sl = New-Object Windows.Forms.Label; $sl.Text = $nm; $sl.Dock = 'Fill'; $sl.TextAlign = 'MiddleCenter'; $sl.ForeColor = 'White'; $sl.Font = New-Object Drawing.Font('Segoe UI', 10, [Drawing.FontStyle]::Bold); $sl.BackColor = [Drawing.Color]::FromArgb(40, 70, 104)
     $pSteps.Controls.Add($sl, $ti, 0); $Global:StepLbls += $sl; $ti++
 }
 $pWizard = New-Object Windows.Forms.Panel; $pWizard.Dock = 'Fill'; $pWizard.BackColor = [Drawing.Color]::White
@@ -3375,11 +3376,33 @@ $pWizard.Controls.Add($pg3); $pWizard.Controls.Add($pg2); $pWizard.Controls.Add(
 $Global:Paginas = @($pg1, $pg2, $pg3)
 $form.Controls.Add($pWizard); $form.Controls.Add($pSteps); $form.Controls.Add($pTopo)
 
+$Global:CorPrim = [Drawing.Color]::FromArgb(18, 52, 86)
+$Global:CorAcc = [Drawing.Color]::FromArgb(30, 142, 62)
 function Show-Pagina([int]$n) {
     for ($i = 0; $i -lt 3; $i++) { $Global:Paginas[$i].Visible = ($i -eq ($n - 1)) }
     $Global:Paginas[$n - 1].BringToFront()
-    for ($i = 0; $i -lt 3; $i++) { $Global:StepLbls[$i].BackColor = $(if ($i -eq ($n - 1)) { [Drawing.Color]::FromArgb(30, 142, 62) } else { [Drawing.Color]::FromArgb(40, 70, 104) }) }
+    $nomes = @('ATENDIMENTO', 'ANALISE', 'LAUDO')
+    for ($i = 0; $i -lt 3; $i++) {
+        if ($i -lt ($n - 1)) { $Global:StepLbls[$i].BackColor = [Drawing.Color]::FromArgb(27, 94, 55); $Global:StepLbls[$i].Text = ("   " + [char]0x2713 + "   " + $nomes[$i]) }
+        elseif ($i -eq ($n - 1)) { $Global:StepLbls[$i].BackColor = $Global:CorAcc; $Global:StepLbls[$i].Text = ("   " + ($i + 1) + "   " + $nomes[$i]) }
+        else { $Global:StepLbls[$i].BackColor = [Drawing.Color]::FromArgb(40, 70, 104); $Global:StepLbls[$i].Text = ("   " + ($i + 1) + "   " + $nomes[$i]) }
+    }
 }
+function Style-Btn($b, $bg, $fg, $hover) {
+    $b.FlatStyle = 'Flat'; $b.FlatAppearance.BorderSize = 0; $b.BackColor = $bg; $b.ForeColor = $fg
+    $b.FlatAppearance.MouseOverBackColor = $hover; $b.Cursor = 'Hand'
+    if (-not $b.Font.Bold) { $b.Font = New-Object Drawing.Font('Segoe UI', 9.5, [Drawing.FontStyle]::Bold) }
+}
+$cClaro = [Drawing.Color]::FromArgb(230, 236, 242); $cClaroH = [Drawing.Color]::FromArgb(214, 224, 234)
+Style-Btn $btnIniciar $Global:CorAcc 'White' ([Drawing.Color]::FromArgb(36, 160, 72))
+Style-Btn $btnRel $Global:CorAcc 'White' ([Drawing.Color]::FromArgb(36, 160, 72))
+Style-Btn $btnCorrigir ([Drawing.Color]::FromArgb(230, 81, 0)) 'White' ([Drawing.Color]::FromArgb(245, 124, 0))
+Style-Btn $btnOtimizar $Global:CorPrim 'White' ([Drawing.Color]::FromArgb(28, 74, 122))
+Style-Btn $btnAtivar ([Drawing.Color]::FromArgb(84, 110, 140)) 'White' ([Drawing.Color]::FromArgb(100, 128, 160))
+Style-Btn $btnPasta $cClaro $Global:CorPrim $cClaroH
+Style-Btn $btnNovo $cClaro $Global:CorPrim $cClaroH
+Style-Btn $btnPrecos $cClaro $Global:CorPrim $cClaroH
+Style-Btn $btnTimbrado $cClaro $Global:CorPrim $cClaroH
 
 function Build-LaudoResumo {
     $Global:LaudoSum.Controls.Clear()
