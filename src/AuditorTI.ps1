@@ -20,7 +20,7 @@ param(
     [switch]$Capturar           # (sem interface) faz a captura de pacotes no teste de rede
 )
 
-$Global:VersaoApp = '1.5.0'
+$Global:VersaoApp = '1.6.0'
 $ErrorActionPreference = 'Continue'
 try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop } catch {}
 
@@ -742,6 +742,7 @@ public static class AuditorMem {
         $modoTxt = if ($completo) { 'completa (todos os setores)' } else { 'amostrada (200 pontos ao longo do disco)' }
         Log ("Leitura {0} dos discos físicos..." -f $modoTxt)
         $tLeit = New-Object System.Collections.ArrayList
+        $mapas = New-Object System.Collections.ArrayList
         $fis = @(Get-PhysicalDisk | Where-Object { [string]$_.BusType -notin @('7', 'USB') -or $completo })
         foreach ($pd in @(Get-PhysicalDisk | Sort-Object DeviceId)) {
             $num = [int]$pd.DeviceId
@@ -763,6 +764,19 @@ public static class AuditorMem {
                 'Modo' = $(if ($completo) { 'Completo' } else { 'Amostrado' }); 'Lido (GB)' = $gb
                 'Vel. média (MB/s)' = $med; 'Mínima' = $mn; 'Máxima' = $mx; 'Erros de leitura' = $nErr
             })
+            # mapa de setores: reduz as amostras de velocidade a 120 células
+            $velArr = @($rd.Velos); $NCEL = 120; $cells = New-Object System.Collections.ArrayList
+            if ($velArr.Count -gt 0) {
+                for ($ci = 0; $ci -lt $NCEL; $ci++) {
+                    $a = [int]([double]$ci * $velArr.Count / $NCEL); $b = [int]([double]($ci + 1) * $velArr.Count / $NCEL)
+                    if ($b -le $a) { $b = $a + 1 }; if ($b -gt $velArr.Count) { $b = $velArr.Count }
+                    $slice = $velArr[$a..($b - 1)]
+                    [void]$cells.Add([math]::Round(($slice | Measure-Object -Average).Average, 0))
+                }
+            }
+            $erroCells = New-Object System.Collections.ArrayList
+            if ([int64]$pd.Size -gt 0) { foreach ($ep in $rd.Erros) { $idx = [int]([double]$ep / [double]$pd.Size * $NCEL); if ($idx -ge $NCEL) { $idx = $NCEL - 1 }; if ($idx -lt 0) { $idx = 0 }; [void]$erroCells.Add($idx) } }
+            [void]$mapas.Add([ordered]@{ Num = $num; Nome = [string]$pd.FriendlyName; Interface = $bt; TamGB = (GB $pd.Size); Modo = $(if ($completo) { 'Completo' } else { 'Amostrado' }); Med = $med; Min = $mn; Max = $mx; Erros = $nErr; Cells = @($cells); ErroCells = @($erroCells | Select-Object -Unique) })
             if ($num -eq 0 -or ([string]$pd.DeviceId -eq [string]$R.Metricas.NumSistema)) { $R.Metricas.LeituraSistema = $med }
             if ($nErr -gt 0) {
                 $locais = (($rd.Erros | Select-Object -First 5 | ForEach-Object { "{0:N1} GB" -f ($_ / 1GB) }) -join ', ')
@@ -773,6 +787,7 @@ public static class AuditorMem {
             }
         }
         Add-Tabela $R ("Leitura dos discos ({0})" -f $modoTxt) $tLeit
+        $R.Metricas.MapaDiscos = @($mapas)
 
         # Latência aleatória 4K no disco do sistema (importante para SSD)
         $letra = $env:SystemDrive.TrimEnd(':')
@@ -1900,6 +1915,9 @@ function ConvertTo-TabelaHtml($linhas, [int]$max = 30) {
     return $sb.ToString()
 }
 
+function Mget([string]$id, [string]$k) { if ($Global:Resultados.Contains($id)) { $m = $Global:Resultados[$id].Metricas; if ($m -and $m.Contains($k)) { return $m[$k] } } return $null }
+function Get-SitArea([string]$id) { if (-not $Global:Resultados.Contains($id)) { return 'info' }; Get-Classe $Global:Resultados[$id].Situacao }
+
 function New-RelatorioHtml($Info, $Notas, [string]$HashEvid, $HashesPrints) {
     $sb = New-Object System.Text.StringBuilder
     $Wr = { param($t) [void]$sb.Append($t) }
@@ -1967,6 +1985,37 @@ table.dados tbody tr:nth-child(even) td { background: rgba(240,244,248,.9); }
 .mono { font-family: Consolas, monospace; font-size: 7.5pt; word-break: break-all; }
 .log { font-family: Consolas, monospace; font-size: 6.8pt; white-space: pre-wrap; background: rgba(240,244,248,.92); padding: 2mm; border-radius: 1mm; }
 ul { margin: 1mm 0 2mm 5mm; padding-left: 3mm; } li { margin-bottom: 1mm; }
+.laudo-t { font-size: 16pt; color: #123456; font-weight: 800; margin: 5mm 0 1mm; }
+.laudo-s { color: #486581; margin-bottom: 3mm; }
+.cont2 { display: flex; gap: 4mm; margin: 3mm 0; }
+.cc { flex: 1; border-radius: 3mm; padding: 4mm 2mm; text-align: center; color: #fff; page-break-inside: avoid; }
+.cc .n { font-size: 28pt; font-weight: 800; line-height: 1; }
+.cc .l { font-size: 9pt; font-weight: 600; margin-top: 1mm; }
+.cc-red { background: #c62828; } .cc-green { background: #2e7d32; } .cc-amber { background: #ef6c00; }
+.prior .it { display: flex; gap: 3mm; align-items: flex-start; background: rgba(247,249,251,.95); border-left: 3mm solid #e65100; border-radius: 1mm; padding: 2mm 3mm; margin: 1.5mm 0; page-break-inside: avoid; }
+.prior .it .num { background: #123456; color: #fff; width: 7mm; height: 7mm; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; flex-shrink: 0; }
+.prior .it b { color: #123456; }
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3mm; margin: 2mm 0 4mm; }
+.kcard { border: 1px solid #d9e2ec; border-radius: 2mm; padding: 3mm; page-break-inside: avoid; border-top: 1.5mm solid #90a4ae; background: rgba(255,255,255,.92); }
+.kcard.ok { border-top-color: #2e7d32; } .kcard.atencao { border-top-color: #f9a825; } .kcard.critico { border-top-color: #c62828; }
+.kcard .t { font-size: 8pt; color: #627d98; text-transform: uppercase; letter-spacing: .3px; margin-bottom: 1mm; }
+.kcard .v { font-size: 17pt; font-weight: 800; color: #123456; line-height: 1.1; }
+.kcard .s { font-size: 8pt; color: #486581; margin-top: 1mm; }
+.mapa .grade { display: grid; grid-template-columns: repeat(40, 1fr); gap: 1px; margin: 1mm 0; }
+.mapa .cel { width: 100%; padding-top: 100%; border-radius: .4mm; }
+.cel-bom { background: #2e7d32; } .cel-lento { background: #9ccc65; } .cel-mlento { background: #f9a825; } .cel-nao { background: #c62828; } .cel-sem { background: #e4e7eb; }
+.leg { display: flex; flex-wrap: wrap; gap: 4mm; font-size: 7.5pt; color: #486581; margin: 1mm 0 2mm; }
+.leg span { display: inline-flex; align-items: center; gap: 1mm; }
+.leg i { width: 3mm; height: 3mm; border-radius: .4mm; display: inline-block; }
+.svgvel { width: 100%; height: 26mm; border: 1px solid #e4e7eb; border-radius: 1mm; background: rgba(255,255,255,.9); }
+.orc table { width: 100%; border-collapse: collapse; font-size: 8.5pt; margin: 1mm 0; }
+.orc th { background: #123456; color: #fff; padding: 1.5mm; text-align: left; }
+.orc td { border-bottom: 1px solid #d9e2ec; padding: 1.5mm; vertical-align: top; }
+.orc .preco { text-align: right; white-space: nowrap; }
+.orc .pinput { width: 26mm; text-align: right; border: 1px solid #bcccdc; border-radius: 1mm; padding: .6mm 1mm; font: inherit; }
+.orc .total { font-size: 13pt; font-weight: 800; color: #123456; text-align: right; margin-top: 2mm; }
+.tag { display: inline-block; padding: .3mm 2mm; border-radius: 3mm; font-size: 7pt; font-weight: 700; color: #fff; }
+.tag-urg { background: #c62828; } .tag-rec { background: #e65100; } .tag-plan { background: #f9a825; color: #222; } .tag-opc { background: #78909c; }
 </style></head><body>
 "@
     if ($Info.Timbrado -and (Test-Path $Info.Timbrado)) {
@@ -1988,13 +2037,105 @@ ul { margin: 1mm 0 2mm 5mm; padding-left: 3mm; } li { margin-bottom: 1mm; }
     & $Wr "<div><b>Processador:</b> $(Esc $res.CPU)</div><div><b>Memória:</b> $(Esc $res.RAM)</div>"
     & $Wr "</div>"
 
+    # ========== LAUDO (resumo para o cliente) ==========
+    $cnt = $Notas.Contagem
+    $nCrit = [int]$cnt['Crítico']; $nAlto = [int]$cnt['Alto']
+    $areasOk = 0; $areasAt = 0
+    foreach ($k in $Global:Resultados.Keys) {
+        $na = @($Global:Resultados[$k].Achados | Where-Object { $_.Severidade -ne 'Info' }).Count
+        if ($na -eq 0) { $areasOk++ } else { $areasAt++ }
+    }
+    & $Wr "<div class='laudo-t'>Laudo do computador</div>"
+    & $Wr "<div class='laudo-s'>Resumo do que foi encontrado neste equipamento.</div>"
+    & $Wr "<div class='cont2'>"
+    & $Wr "<div class='cc cc-red'><div class='n'>$nCrit</div><div class='l'>Problema(s) crítico(s)</div></div>"
+    & $Wr "<div class='cc cc-amber'><div class='n'>$areasAt</div><div class='l'>Ponto(s) de atenção</div></div>"
+    & $Wr "<div class='cc cc-green'><div class='n'>$areasOk</div><div class='l'>Área(s) sem problema</div></div>"
+    & $Wr "</div>"
+
+    # Primeiro, o mais importante (top 3)
+    $top = @($todos | Where-Object { $_.Severidade -in @('Crítico', 'Alto') } | Sort-Object @{e = { Get-RankSev $_.Severidade } })
+    $vt = @{}; $top3 = foreach ($a in $top) { if ($vt[$a.Recomendacao]) { continue }; $vt[$a.Recomendacao] = 1; $a } 
+    $top3 = @($top3 | Select-Object -First 3)
+    & $Wr "<h2>Primeiro, o mais importante</h2>"
+    if ($top3.Count) {
+        & $Wr "<div class='prior'>"
+        $i = 0; foreach ($a in $top3) { $i++; & $Wr "<div class='it'><div class='num'>$i</div><div><b>$(Esc $a.Achado)</b><br><span class='obs' style='font-style:normal'>&#10140; $(Esc $a.Recomendacao)</span></div></div>" }
+        & $Wr "</div>"
+    }
+    else { & $Wr "<p>Nenhuma ação urgente. O computador está em boas condições.</p>" }
+
+    # Cartões de métrica
+    & $Wr "<h2>Visão geral da máquina</h2><div class='cards'>"
+    $kc = {
+        param($cls, $tit, $val, $sub)
+        & $Wr "<div class='kcard $cls'><div class='t'>$(Esc $tit)</div><div class='v'>$(Esc $val)</div><div class='s'>$(Esc $sub)</div></div>"
+    }
+    & $kc (Get-Classe (& { if ($Notas.Desempenho -ge 7) { 'OK' } elseif ($Notas.Desempenho -ge 5) { 'Atenção' } else { 'Crítico' } })) 'Desempenho' ("$(Format-Nota $Notas.Desempenho)/10") $cD[0]
+    & $kc (Get-Classe (& { if ($Notas.Seguranca -ge 7) { 'OK' } elseif ($Notas.Seguranca -ge 5) { 'Atenção' } else { 'Crítico' } })) 'Segurança' ("$(Format-Nota $Notas.Seguranca)/10") $cS[0]
+    $tipoD = Mget 'disco' 'TipoSistema'; $livreD = Mget 'disco' 'LivreSistema'; $leitD = Mget 'disco' 'LeituraSistema'
+    if ($tipoD) { & $kc (Get-SitArea 'disco') 'Disco do sistema' $tipoD ("$(if($null -ne $livreD){"$livreD% livre"})$(if($leitD){" · $leitD MB/s"})") }
+    $ramG = Mget 'memoria' 'RamGB'; $ramU = Mget 'memoria' 'RamUso'; $slots = Mget 'memoria' 'SlotsLivres'
+    if ($ramG) { & $kc (Get-SitArea 'memoria') 'Memória RAM' ("$ramG GB") ("$(if($null -ne $ramU){"$ramU% em uso"})$(if($null -ne $slots){" · $slots slot(s) livre(s)"})") }
+    $bsod = Mget 'eventos' 'BSOD'
+    if ($null -ne $bsod) { & $kc (Get-Classe (& { if ([int]$bsod -gt 0) { 'Atenção' } else { 'OK' } })) 'Estabilidade (30 dias)' ("$bsod") 'tela(s) azul(is)' }
+    $bat = Mget 'desempenho' 'Bateria'
+    if ($null -ne $bat) { & $kc (Get-Classe (& { if ([int]$bat -lt 60) { 'Atenção' } else { 'OK' } })) 'Bateria do notebook' ("$bat%") 'da capacidade original' }
+    & $Wr "</div>"
+
+    # Mapa de setores do disco
+    $mapas = Mget 'disco' 'MapaDiscos'
+    if ($mapas -and @($mapas).Count) {
+        & $Wr "<h2>Mapa de leitura dos discos</h2>"
+        & $Wr "<p class='obs' style='font-style:normal'>Cada quadradinho é um trecho do disco. Verde = leu bem; vermelho = não conseguiu ler (defeito).</p>"
+        foreach ($mp in @($mapas)) {
+            $cells = @($mp.Cells); $errs = @($mp.ErroCells)
+            if (-not $cells.Count) { continue }
+            $medv = [double]$mp.Med; if ($medv -le 0) { $medv = ($cells | Measure-Object -Average).Average }; if ($medv -le 0) { $medv = 1 }
+            $maxv = [double]$mp.Max; if ($maxv -le 0) { $maxv = ($cells | Measure-Object -Maximum).Maximum }; if ($maxv -le 0) { $maxv = 1 }
+            & $Wr "<div class='mapa'><h3>Disco $($mp.Num) — $(Esc $mp.Nome) <span class='obs'>($(Esc $mp.Interface), $($mp.TamGB) GB — leitura $($mp.Modo.ToLower()), média $($mp.Med) MB/s)</span></h3>"
+            & $Wr "<div class='grade'>"
+            for ($ci = 0; $ci -lt $cells.Count; $ci++) {
+                $cl = 'cel-sem'; $v = [double]$cells[$ci]
+                if ($errs -contains $ci) { $cl = 'cel-nao' }
+                elseif ($v -le 0) { $cl = 'cel-sem' }
+                elseif ($v -ge 0.7 * $medv) { $cl = 'cel-bom' }
+                elseif ($v -ge 0.4 * $medv) { $cl = 'cel-lento' }
+                else { $cl = 'cel-mlento' }
+                & $Wr "<div class='cel $cl'></div>"
+            }
+            & $Wr "</div>"
+            & $Wr "<div class='leg'><span><i class='cel-bom'></i>Bom</span><span><i class='cel-lento'></i>Lento</span><span><i class='cel-mlento'></i>Muito lento</span><span><i class='cel-nao'></i>Não leu</span></div>"
+            # gráfico de velocidade (SVG)
+            $W = 600; $H = 120; $esc = $H / [math]::Max($maxv, 1)
+            $pts = ''; for ($ci = 0; $ci -lt $cells.Count; $ci++) { $x = [math]::Round($ci / [math]::Max($cells.Count - 1, 1) * $W, 1); $y = [math]::Round($H - [double]$cells[$ci] * $esc, 1); $pts += "$x,$y " }
+            & $Wr "<svg class='svgvel' viewBox='0 0 $W $H' preserveAspectRatio='none'><polyline points='$pts' fill='none' stroke='#123456' stroke-width='2'/></svg>"
+            & $Wr "<div class='leg'><span>0 MB/s</span><span style='margin-left:auto'>$([int]$maxv) MB/s — início ao fim do disco</span></div></div>"
+        }
+    }
+
+    # Orçamento
+    $orc = @($todos | Where-Object { $_.Upgrade } | Sort-Object @{e = { Get-RankSev $_.Severidade } })
+    & $Wr "<h2>Orçamento sugerido</h2>"
+    if ($orc.Count) {
+        & $Wr "<p class='obs' style='font-style:normal'>Preencha os valores (peça + serviço) abaixo e use Ctrl+P para gerar o PDF final. O total é calculado automaticamente.</p>"
+        & $Wr "<div class='orc'><table><thead><tr><th style='width:20mm'>Prioridade</th><th>Serviço / upgrade</th><th style='width:30mm' class='preco'>Valor (R$)</th></tr></thead><tbody>"
+        foreach ($o in $orc) {
+            $tg = switch ($o.Severidade) { 'Crítico' { @('tag-urg', 'Urgente') } 'Alto' { @('tag-rec', 'Recomendado') } 'Médio' { @('tag-plan', 'Planejar') } default { @('tag-opc', 'Opcional') } }
+            & $Wr "<tr><td><span class='tag $($tg[0])'>$($tg[1])</span></td><td><b>$(Esc $o.Achado)</b><br><span class='obs' style='font-style:normal'>$(Esc $o.Recomendacao)</span></td><td class='preco'><input class='pinput' type='text' inputmode='decimal' placeholder='0,00'></td></tr>"
+        }
+        & $Wr "</tbody></table><div class='total'>Total: <span id='orctotal'>R$ 0,00</span></div></div>"
+    }
+    else { & $Wr "<p>Nenhum upgrade necessário no momento. O equipamento atende ao uso atual.</p>" }
+
+    # ---------- Notas (início do anexo técnico) ----------
+    & $Wr "<h2 class='quebra'>Anexo técnico — avaliação detalhada</h2>"
     # ---------- Notas ----------
     $degD = [int]($Notas.Desempenho * 36); $degS = [int]($Notas.Seguranca * 36)
     & $Wr "<h2>Avaliação geral</h2><div class='notas'>"
     & $Wr "<div class='nota'><div class='dial' style='background: conic-gradient($($cD[1]) ${degD}deg, #e4e7eb 0)'><span>$(Format-Nota $Notas.Desempenho)</span></div><div><div class='tit'>Nota de desempenho</div><div class='conc' style='color:$($cD[1])'>$($cD[0])</div><div class='obs'>Escala de 0 a 10 — hardware, disco, memória, CPU e estabilidade</div></div></div>"
     & $Wr "<div class='nota'><div class='dial' style='background: conic-gradient($($cS[1]) ${degS}deg, #e4e7eb 0)'><span>$(Format-Nota $Notas.Seguranca)</span></div><div><div class='tit'>Nota de segurança</div><div class='conc' style='color:$($cS[1])'>$($cS[0])</div><div class='obs'>Escala de 0 a 10 — atualizações, antivírus, firewall, contas e configurações</div></div></div>"
     & $Wr "</div>"
-    $cnt = $Notas.Contagem
     & $Wr "<div class='chips'><div class='chip critico'><b>$($cnt['Crítico'])</b>Crítico</div><div class='chip alto'><b>$($cnt['Alto'])</b>Alto</div><div class='chip medio'><b>$($cnt['Médio'])</b>Médio</div><div class='chip baixo'><b>$($cnt['Baixo'])</b>Baixo</div></div>"
 
     # ---------- Resumo executivo ----------
@@ -2096,6 +2237,7 @@ ul { margin: 1mm 0 2mm 5mm; padding-left: 3mm; } li { margin-bottom: 1mm; }
     # ---------- Assinaturas ----------
     & $Wr "<div class='assin'><div>$(Esc $Info.Tecnico)<br>Técnico responsável</div><div>$(Esc $Info.Cliente)<br>Cliente / responsável pelo equipamento</div></div>"
     & $Wr "<p class='obs' style='text-align:center;margin-top:4mm'>Relatório gerado automaticamente em $((Get-Date).ToString('dd/MM/yyyy HH:mm')) — $(Esc $Global:IdAud)</p>"
+    & $Wr "<script>function somaOrc(){var t=0;document.querySelectorAll('.pinput').forEach(function(e){var v=parseFloat((e.value||'').replace(/[^0-9,.-]/g,'').replace(',','.'));if(!isNaN(v))t+=v;});var el=document.getElementById('orctotal');if(el)el.textContent='R$ '+t.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});}document.addEventListener('DOMContentLoaded',somaOrc);document.addEventListener('input',somaOrc);</script>"
     & $Wr "</td></tr></tbody></table></body></html>"
     return $sb.ToString()
 }

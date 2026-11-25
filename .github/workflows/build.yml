@@ -49,6 +49,14 @@ jobs:
           $pc = Get-ChildItem $saida -Recurse -Filter 'captura_rede.*' | Select-Object -First 1
           if ($pc) { Write-Host "Captura de rede gerada: $($pc.Name) ($([math]::Round($pc.Length/1KB)) KB)" } else { Write-Host 'Aviso: captura de rede nao gerou arquivo (pode ocorrer em VM)' }
           if ($txt -match '([0-9]+) erro\(s\) em') { Write-Host "Teste de RAM: $($matches[1]) erro(s)" }
+          $rel = Get-ChildItem $saida -Recurse -Filter 'Relatorio_Auditoria_*.html' | Select-Object -First 1
+          $html = Get-Content $rel.FullName -Raw
+          foreach ($marca in @('Laudo do computador','Primeiro, o mais importante','Visão geral da máquina','Orçamento sugerido','Mapa de leitura','Anexo técnico')) {
+            if ($html -notmatch [regex]::Escape($marca)) { Write-Host "Laudo sem a secao: $marca"; exit 1 }
+          }
+          if ($html -notmatch 'class=.cel cel-') { Write-Host 'Mapa de setores nao foi desenhado'; exit 1 }
+          Write-Host 'Laudo novo (estilo cartoes) OK'
+
 
       - name: Testar o script de desfazer
         timeout-minutes: 5
