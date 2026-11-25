@@ -51,7 +51,7 @@ jobs:
           if ($txt -match '([0-9]+) erro\(s\) em') { Write-Host "Teste de RAM: $($matches[1]) erro(s)" }
           $rel = Get-ChildItem $saida -Recurse -Filter 'relatorio.html' | Select-Object -First 1
           $html = Get-Content $rel.FullName -Raw
-          foreach ($marca in @('Laudo do computador','Primeiro, o mais importante','Visão geral da máquina','Orçamento sugerido','Mapa de leitura','Anexo técnico')) {
+          foreach ($marca in @('Laudo do computador','Primeiro, o mais importante','geral da m','amento sugerido','Mapa de leitura','Anexo t')) {
             if ($html -notmatch [regex]::Escape($marca)) { Write-Host "Laudo sem a secao: $marca"; exit 1 }
           }
           if ($html -notmatch 'class=.cel cel-') { Write-Host 'Mapa de setores nao foi desenhado'; exit 1 }
