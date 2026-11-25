@@ -20,7 +20,7 @@ param(
     [switch]$Capturar           # (sem interface) faz a captura de pacotes no teste de rede
 )
 
-$Global:VersaoApp = '1.6.0'
+$Global:VersaoApp = '1.7.0'
 $ErrorActionPreference = 'Continue'
 try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop } catch {}
 
@@ -2047,6 +2047,7 @@ ul { margin: 1mm 0 2mm 5mm; padding-left: 3mm; } li { margin-bottom: 1mm; }
     }
     & $Wr "<div class='laudo-t'>Laudo do computador</div>"
     & $Wr "<div class='laudo-s'>Resumo do que foi encontrado neste equipamento.</div>"
+    if ($Info.Reclamacao) { & $Wr "<div class='ident' style='margin-bottom:3mm'><div><b>Motivo informado:</b> $(Esc $Info.Reclamacao)</div></div>" }
     & $Wr "<div class='cont2'>"
     & $Wr "<div class='cc cc-red'><div class='n'>$nCrit</div><div class='l'>Problema(s) crítico(s)</div></div>"
     & $Wr "<div class='cc cc-amber'><div class='n'>$areasAt</div><div class='l'>Ponto(s) de atenção</div></div>"
@@ -2120,11 +2121,16 @@ ul { margin: 1mm 0 2mm 5mm; padding-left: 3mm; } li { margin-bottom: 1mm; }
     if ($orc.Count) {
         & $Wr "<p class='obs' style='font-style:normal'>Preencha os valores (peça + serviço) abaixo e use Ctrl+P para gerar o PDF final. O total é calculado automaticamente.</p>"
         & $Wr "<div class='orc'><table><thead><tr><th style='width:20mm'>Prioridade</th><th>Serviço / upgrade</th><th style='width:30mm' class='preco'>Valor (R$)</th></tr></thead><tbody>"
+        $somaIni = 0.0
         foreach ($o in $orc) {
             $tg = switch ($o.Severidade) { 'Crítico' { @('tag-urg', 'Urgente') } 'Alto' { @('tag-rec', 'Recomendado') } 'Médio' { @('tag-plan', 'Planejar') } default { @('tag-opc', 'Opcional') } }
-            & $Wr "<tr><td><span class='tag $($tg[0])'>$($tg[1])</span></td><td><b>$(Esc $o.Achado)</b><br><span class='obs' style='font-style:normal'>$(Esc $o.Recomendacao)</span></td><td class='preco'><input class='pinput' type='text' inputmode='decimal' placeholder='0,00'></td></tr>"
+            $pv = ''
+            if ($Info.Precos -and $Info.Precos.ContainsKey($o.Achado)) { $pv = [string]$Info.Precos[$o.Achado] }
+            if ($pv) { $nv = 0.0; if ([double]::TryParse(($pv -replace '[^0-9,.-]', '' -replace ',', '.'), [ref]$nv)) { $somaIni += $nv } }
+            & $Wr "<tr><td><span class='tag $($tg[0])'>$($tg[1])</span></td><td><b>$(Esc $o.Achado)</b><br><span class='obs' style='font-style:normal'>$(Esc $o.Recomendacao)</span></td><td class='preco'><input class='pinput' type='text' inputmode='decimal' placeholder='0,00' value='$(Esc $pv)'></td></tr>"
         }
-        & $Wr "</tbody></table><div class='total'>Total: <span id='orctotal'>R$ 0,00</span></div></div>"
+        $totIni = 'R$ ' + $somaIni.ToString('N2', [Globalization.CultureInfo]'pt-BR')
+        & $Wr "</tbody></table><div class='total'>Total: <span id='orctotal'>$totIni</span></div></div>"
     }
     else { & $Wr "<p>Nenhum upgrade necessário no momento. O equipamento atende ao uso atual.</p>" }
 
@@ -3291,7 +3297,110 @@ $pAcoes.Controls.AddRange(@($btnCorrigir, $btnOtimizar, $btnAtivar))
 $pDir.Controls.Add($tabs); $pDir.Controls.Add($esp1); $pDir.Controls.Add($prog); $pDir.Controls.Add($lblStatus); $pDir.Controls.Add($pAcoes); $pDir.Controls.Add($txtLog)
 $tabs.BringToFront()
 
-$form.Controls.Add($pDir); $form.Controls.Add($pEsq); $form.Controls.Add($pTopo)
+# ===== Assistente de 3 etapas: Atendimento -> Analise -> Laudo =====
+$pSteps = New-Object Windows.Forms.TableLayoutPanel
+$pSteps.Dock = 'Top'; $pSteps.Height = 30; $pSteps.ColumnCount = 3; $pSteps.RowCount = 1; $pSteps.BackColor = [Drawing.Color]::FromArgb(40, 70, 104); $pSteps.Margin = New-Object Windows.Forms.Padding(0)
+foreach ($w in @(34, 33, 33)) { [void]$pSteps.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle([Windows.Forms.SizeType]::Percent, [single]$w))) }
+$Global:StepLbls = @()
+$ti = 0
+foreach ($nm in @('1  ATENDIMENTO', '2  ANALISE', '3  LAUDO')) {
+    $sl = New-Object Windows.Forms.Label; $sl.Text = $nm; $sl.Dock = 'Fill'; $sl.TextAlign = 'MiddleCenter'; $sl.ForeColor = 'White'; $sl.Font = New-Object Drawing.Font('Segoe UI', 9.5, [Drawing.FontStyle]::Bold); $sl.BackColor = [Drawing.Color]::FromArgb(40, 70, 104)
+    $pSteps.Controls.Add($sl, $ti, 0); $Global:StepLbls += $sl; $ti++
+}
+$pWizard = New-Object Windows.Forms.Panel; $pWizard.Dock = 'Fill'; $pWizard.BackColor = [Drawing.Color]::White
+
+# ---- Pagina 1: Atendimento ----
+$pg1 = New-Object Windows.Forms.Panel; $pg1.Dock = 'Fill'; $pg1.BackColor = [Drawing.Color]::White
+$pEsq.Dock = 'Left'; $pEsq.Width = 352
+$pInfo1 = New-Object Windows.Forms.Panel; $pInfo1.Dock = 'Fill'; $pInfo1.BackColor = [Drawing.Color]::White
+$l1t = New-Object Windows.Forms.Label; $l1t.Text = 'Novo atendimento'; $l1t.Font = New-Object Drawing.Font('Segoe UI', 15, [Drawing.FontStyle]::Bold); $l1t.ForeColor = $azul; $l1t.AutoSize = $true; $l1t.Location = New-Object Drawing.Point(18, 10)
+$l1d = New-Object Windows.Forms.Label; $l1d.Text = 'Preencha os dados ao lado, descreva a reclamacao do cliente e inicie a analise. O AuditorTI apenas le informacoes: nao instala, apaga nem altera nada.'; $l1d.Location = New-Object Drawing.Point(18, 46); $l1d.Size = New-Object Drawing.Size(470, 54); $l1d.ForeColor = [Drawing.Color]::FromArgb(70, 101, 129)
+$l1r = New-Object Windows.Forms.Label; $l1r.Text = 'Reclamacao do cliente / motivo da visita'; $l1r.Location = New-Object Drawing.Point(18, 108); $l1r.Size = New-Object Drawing.Size(470, 18); $l1r.Font = New-Object Drawing.Font('Segoe UI', 9, [Drawing.FontStyle]::Bold)
+$txtReclamacao = New-Object Windows.Forms.TextBox; $txtReclamacao.Multiline = $true; $txtReclamacao.Location = New-Object Drawing.Point(18, 128); $txtReclamacao.Size = New-Object Drawing.Size(478, 90); $txtReclamacao.ScrollBars = 'Vertical'
+$btnIniciar.Size = New-Object Drawing.Size(478, 48); $btnIniciar.Location = New-Object Drawing.Point(18, 232); $btnIniciar.Text = 'INICIAR ANALISE'
+$pInfo1.Controls.AddRange(@($l1t, $l1d, $l1r, $txtReclamacao, $btnIniciar))
+$pg1.Controls.Add($pInfo1); $pg1.Controls.Add($pEsq)
+
+# ---- Pagina 2: Analise ----
+$pg2 = New-Object Windows.Forms.Panel; $pg2.Dock = 'Fill'; $pg2.BackColor = [Drawing.Color]::White; $pg2.Visible = $false
+$pg2top = New-Object Windows.Forms.Panel; $pg2top.Dock = 'Top'; $pg2top.Height = 110; $pg2top.Padding = New-Object Windows.Forms.Padding(16, 10, 16, 0)
+$lblPct = New-Object Windows.Forms.Label; $lblPct.Text = '0%'; $lblPct.Dock = 'Top'; $lblPct.Height = 56; $lblPct.TextAlign = 'MiddleCenter'; $lblPct.Font = New-Object Drawing.Font('Segoe UI', 34, [Drawing.FontStyle]::Bold); $lblPct.ForeColor = $azul
+$prog.Dock = 'Top'; $prog.Height = 18
+$lblStatus.Dock = 'Top'; $lblStatus.Height = 24; $lblStatus.TextAlign = 'MiddleCenter'
+$pg2top.Controls.Add($lblStatus); $pg2top.Controls.Add($prog); $pg2top.Controls.Add($lblPct)
+$lblAtd = New-Object Windows.Forms.Label; $lblAtd.Text = 'A analise esta rodando. Voce pode atender outro cliente enquanto isso.'; $lblAtd.Dock = 'Top'; $lblAtd.Height = 20; $lblAtd.TextAlign = 'MiddleCenter'; $lblAtd.ForeColor = [Drawing.Color]::FromArgb(70, 101, 129)
+$lv.Dock = 'Fill'; $txtLog.Dock = 'Bottom'; $txtLog.Height = 96
+$pg2.Controls.Add($lv); $pg2.Controls.Add($txtLog); $pg2.Controls.Add($lblAtd); $pg2.Controls.Add($pg2top); $lv.BringToFront()
+
+# ---- Pagina 3: Laudo ----
+$pg3 = New-Object Windows.Forms.Panel; $pg3.Dock = 'Fill'; $pg3.BackColor = [Drawing.Color]::White; $pg3.Visible = $false
+$pg3top = New-Object Windows.Forms.Panel; $pg3top.Dock = 'Top'; $pg3top.Height = 126; $pg3top.BackColor = [Drawing.Color]::White
+$Global:LaudoSum = $pg3top
+$pg3bot = New-Object Windows.Forms.Panel; $pg3bot.Dock = 'Bottom'; $pg3bot.Height = 92; $pg3bot.BackColor = [Drawing.Color]::FromArgb(244, 247, 250)
+$pAcoes.Dock = 'Top'; $pAcoes.Height = 44
+$pg3botInner = New-Object Windows.Forms.Panel; $pg3botInner.Dock = 'Fill'
+$btnRel.Size = New-Object Drawing.Size(220, 36); $btnRel.Location = New-Object Drawing.Point(8, 6); $btnRel.Text = 'Gerar laudo (PDF)'; $btnRel.BackColor = [Drawing.Color]::FromArgb(30, 142, 62); $btnRel.ForeColor = 'White'; $btnRel.FlatStyle = 'Flat'; $btnRel.Font = New-Object Drawing.Font('Segoe UI', 10, [Drawing.FontStyle]::Bold); $btnRel.Enabled = $true
+$btnPasta.Size = New-Object Drawing.Size(150, 36); $btnPasta.Location = New-Object Drawing.Point(236, 6); $btnPasta.Text = 'Abrir pasta'
+$btnNovo = New-Object Windows.Forms.Button; $btnNovo.Text = 'Novo atendimento'; $btnNovo.Size = New-Object Drawing.Size(170, 36); $btnNovo.Location = New-Object Drawing.Point(396, 6); $btnNovo.FlatStyle = 'Flat'
+$pg3botInner.Controls.AddRange(@($btnRel, $btnPasta, $btnNovo))
+$pg3bot.Controls.Add($pg3botInner); $pg3bot.Controls.Add($pAcoes)
+$tabs.Dock = 'Fill'
+try { [void]$tabs.TabPages.Remove($tabResumo) } catch {}
+$pg3.Controls.Add($tabs); $pg3.Controls.Add($pg3bot); $pg3.Controls.Add($pg3top); $tabs.BringToFront()
+
+$pWizard.Controls.Add($pg3); $pWizard.Controls.Add($pg2); $pWizard.Controls.Add($pg1)
+$Global:Paginas = @($pg1, $pg2, $pg3)
+$form.Controls.Add($pWizard); $form.Controls.Add($pSteps); $form.Controls.Add($pTopo)
+
+function Show-Pagina([int]$n) {
+    for ($i = 0; $i -lt 3; $i++) { $Global:Paginas[$i].Visible = ($i -eq ($n - 1)) }
+    $Global:Paginas[$n - 1].BringToFront()
+    for ($i = 0; $i -lt 3; $i++) { $Global:StepLbls[$i].BackColor = $(if ($i -eq ($n - 1)) { [Drawing.Color]::FromArgb(30, 142, 62) } else { [Drawing.Color]::FromArgb(40, 70, 104) }) }
+}
+
+function Build-LaudoResumo {
+    $Global:LaudoSum.Controls.Clear()
+    $nt = Get-Notas; $cnt = $nt.Contagem
+    $areasOk = 0; $areasAt = 0
+    foreach ($k in $Global:Resultados.Keys) { $na = @($Global:Resultados[$k].Achados | Where-Object { $_.Severidade -ne 'Info' }).Count; if ($na -eq 0) { $areasOk++ } else { $areasAt++ } }
+    $mk = {
+        param($x, $cor, $big, $lab)
+        $pn = New-Object Windows.Forms.Panel; $pn.Location = New-Object Drawing.Point($x, 10); $pn.Size = New-Object Drawing.Size(150, 104); $pn.BackColor = $cor
+        $lb = New-Object Windows.Forms.Label; $lb.Text = $big; $lb.Dock = 'Top'; $lb.Height = 66; $lb.TextAlign = 'MiddleCenter'; $lb.ForeColor = 'White'; $lb.Font = New-Object Drawing.Font('Segoe UI', 24, [Drawing.FontStyle]::Bold)
+        $ll = New-Object Windows.Forms.Label; $ll.Text = $lab; $ll.Dock = 'Top'; $ll.Height = 34; $ll.TextAlign = 'MiddleCenter'; $ll.ForeColor = 'White'; $ll.Font = New-Object Drawing.Font('Segoe UI', 8.5, [Drawing.FontStyle]::Bold)
+        $pn.Controls.Add($lb); $pn.Controls.Add($ll); $Global:LaudoSum.Controls.Add($pn)
+    }
+    & $mk 14 ([Drawing.Color]::FromArgb(18, 52, 86)) ("$(Format-Nota $nt.Desempenho)/10") 'DESEMPENHO'
+    & $mk 172 ([Drawing.Color]::FromArgb(18, 52, 86)) ("$(Format-Nota $nt.Seguranca)/10") 'SEGURANCA'
+    & $mk 330 ([Drawing.Color]::FromArgb(198, 40, 40)) ([string]$cnt['Crítico']) 'CRITICOS'
+    & $mk 488 ([Drawing.Color]::FromArgb(239, 108, 0)) ([string]$areasAt) 'ATENCAO'
+    & $mk 646 ([Drawing.Color]::FromArgb(46, 125, 50)) ([string]$areasOk) 'SEM PROBLEMA'
+}
+
+$Global:OrcCampos = @{}
+function Build-Orcamento {
+    if ($Global:TabOrc) { try { [void]$tabs.TabPages.Remove($Global:TabOrc) } catch {} }
+    $Global:OrcCampos = @{}
+    $tp = New-Object Windows.Forms.TabPage; $tp.Text = 'Orcamento'; $tp.BackColor = [Drawing.Color]::White; $tp.Padding = New-Object Windows.Forms.Padding(3)
+    $hp = New-Object Windows.Forms.Panel; $hp.Dock = 'Fill'; $hp.AutoScroll = $true
+    $orc = @(Get-TodosAchados | Where-Object { $_.Upgrade } | Sort-Object @{e = { Get-RankSev $_.Severidade } })
+    $yy = 8
+    $hint = New-Object Windows.Forms.Label; $hint.Text = 'Preencha o valor (peca + servico) de cada item. O total entra no laudo.'; $hint.Location = New-Object Drawing.Point(8, $yy); $hint.Size = New-Object Drawing.Size(760, 18); $hint.ForeColor = [Drawing.Color]::FromArgb(70, 101, 129); $hp.Controls.Add($hint); $yy += 26
+    if (-not $orc.Count) { $nn = New-Object Windows.Forms.Label; $nn.Text = 'Nenhum upgrade necessario. O equipamento atende ao uso atual.'; $nn.Location = New-Object Drawing.Point(8, $yy); $nn.AutoSize = $true; $hp.Controls.Add($nn) }
+    foreach ($o in $orc) {
+        $tag = switch ($o.Severidade) { 'Crítico' { 'Urgente' } 'Alto' { 'Recomendado' } 'Médio' { 'Planejar' } default { 'Opcional' } }
+        $cor = switch ($o.Severidade) { 'Crítico' { [Drawing.Color]::FromArgb(198, 40, 40) } 'Alto' { [Drawing.Color]::FromArgb(230, 81, 0) } 'Médio' { [Drawing.Color]::FromArgb(249, 168, 37) } default { [Drawing.Color]::FromArgb(120, 144, 156) } }
+        $bt = New-Object Windows.Forms.Label; $bt.Text = $tag; $bt.Location = New-Object Drawing.Point(8, $yy); $bt.Size = New-Object Drawing.Size(86, 20); $bt.BackColor = $cor; $bt.ForeColor = 'White'; $bt.TextAlign = 'MiddleCenter'; $bt.Font = New-Object Drawing.Font('Segoe UI', 8, [Drawing.FontStyle]::Bold)
+        $ds = New-Object Windows.Forms.Label; $ds.Text = $o.Achado; $ds.Location = New-Object Drawing.Point(100, $yy); $ds.Size = New-Object Drawing.Size(520, 34)
+        $pr = New-Object Windows.Forms.TextBox; $pr.Location = New-Object Drawing.Point(630, $yy); $pr.Size = New-Object Drawing.Size(120, 24)
+        $hp.Controls.AddRange(@($bt, $ds, $pr)); $Global:OrcCampos[$o.Achado] = $pr; $yy += 40
+    }
+    $tp.Controls.Add($hp); [void]$tabs.TabPages.Add($tp); $Global:TabOrc = $tp
+}
+function Get-OrcPrecos { $h = @{}; if ($Global:OrcCampos) { foreach ($k in $Global:OrcCampos.Keys) { $v = $Global:OrcCampos[$k].Text.Trim(); if ($v) { $h[$k] = $v } } }; return $h }
+
+$btnNovo.Add_Click({ Show-Pagina 1; $txtCliente.Focus() })
+Show-Pagina 1
 
 # Carrega configuração salva
 if (Test-Path $Global:CfgArq) {
@@ -3334,7 +3443,7 @@ $btnRel.Add_Click({
     $btnRel.Enabled = $false; $form.Cursor = 'WaitCursor'
     $lblStatus.Text = 'Gerando relatório e PDF...'; [System.Windows.Forms.Application]::DoEvents()
     try {
-        $info = @{ Cliente = $txtCliente.Text.Trim(); Tecnico = $txtTecnico.Text.Trim(); OS = $txtOS.Text.Trim(); Timbrado = $Global:Timbrado; MargemTopo = $nudTopo.Value; MargemBase = $nudBase.Value; MargemLado = $nudLado.Value }
+        $info = @{ Cliente = $txtCliente.Text.Trim(); Tecnico = $txtTecnico.Text.Trim(); OS = $txtOS.Text.Trim(); Reclamacao = $txtReclamacao.Text.Trim(); Timbrado = $Global:Timbrado; MargemTopo = $nudTopo.Value; MargemBase = $nudBase.Value; MargemLado = $nudLado.Value; Precos = (Get-OrcPrecos) }
         $rel = New-Relatorio $info
         $Global:UltimaPasta = $rel.Pasta; $btnPasta.Enabled = $true
         Write-LogUI "Relatório gerado em: $($rel.Pasta)"
@@ -3381,6 +3490,7 @@ $btnIniciar.Add_Click({
     $Global:IdAud = 'AUD-{0}-{1}' -f $Global:Inicio.ToString('yyyyMMdd-HHmm'), ([guid]::NewGuid().ToString('N').Substring(0, 4).ToUpper())
     Write-LogUI "Auditoria $Global:IdAud iniciada - cliente: $($txtCliente.Text.Trim()) - técnico: $($txtTecnico.Text.Trim())"
     $prog.Minimum = 0; $prog.Maximum = $sel.Count; $prog.Value = 0
+    Show-Pagina 2; $lblPct.Text = '0%'
     $n = 0
     foreach ($t in $sel) {
         if ($Global:Cancelar) { break }
@@ -3406,6 +3516,7 @@ $btnIniciar.Add_Click({
         Write-LogUI "Concluído: $($t.Nome) -> $($res.Situacao) ($nA achado(s))"
         $Global:Prints[$t.Id] = $(if ($Global:TabMap.ContainsKey($t.Id)) { Get-Print $Global:TabMap[$t.Id].Content } else { Get-Print })
         $prog.Value = $n
+        $lblPct.Text = ('{0}%' -f [int]($n / $sel.Count * 100))
     }
     $Global:Fim = Get-Date
     $Global:Rodando = $false
@@ -3413,10 +3524,11 @@ $btnIniciar.Add_Click({
     if ($Global:FecharApos) { $form.Close(); return }
     if ($Global:Resultados.Count) {
         $nt = Get-Notas
-        $lblStatus.Text = "Concluído!  Desempenho: $(Format-Nota $nt.Desempenho)/10 ($((Get-Conceito $nt.Desempenho)[0]))   |   Segurança: $(Format-Nota $nt.Seguranca)/10 ($((Get-Conceito $nt.Seguranca)[0]))"
+        $lblStatus.Text = "Concluído!  Desempenho $(Format-Nota $nt.Desempenho)/10  |  Segurança $(Format-Nota $nt.Seguranca)/10"
+        $lblPct.Text = '100%'
         Write-LogUI $lblStatus.Text
-        $r = [System.Windows.Forms.MessageBox]::Show($form, "Auditoria concluída.`r`n`r`nNota de desempenho: $(Format-Nota $nt.Desempenho) / 10`r`nNota de segurança: $(Format-Nota $nt.Seguranca) / 10`r`n`r`nPara corrigir o que foi encontrado, use o botão 'Solucionar problemas'.`r`n`r`nDeseja gerar o relatório em PDF agora?", 'AuditorTI', 'YesNo', 'Information')
-        if ($r -eq 'Yes') { $btnRel.PerformClick() }
+        Build-LaudoResumo; Build-Orcamento
+        Show-Pagina 3
     }
 })
 
@@ -3435,18 +3547,21 @@ if ($TestarInterface) {
         $Global:Resultados['sistema'] = @{
             Nome = 'Sistema (teste)'; Situacao = 'Atenção'; Desc = 'Verificação automática da interface em abas.'
             Itens = @([pscustomobject]@{ Item = 'Interface'; Valor = 'Janela e abas criadas com sucesso'; Status = 'OK' }, [pscustomobject]@{ Item = 'Exemplo de alerta'; Valor = 'Valor de exemplo'; Status = 'Atenção' })
-            Achados = @([pscustomobject]@{ Categoria = 'Segurança'; Severidade = 'Alto'; Achado = 'Achado de exemplo para testar o layout.'; Recomendacao = 'Recomendação de exemplo.'; Penalidade = 1.0; Upgrade = $false })
-            Tabelas = @(@{ Titulo = 'Tabela de exemplo'; Linhas = @([pscustomobject]@{ Coluna1 = 'A'; Coluna2 = 'B'; Coluna3 = 'C' }, [pscustomobject]@{ Coluna1 = '1'; Coluna2 = '2'; Coluna3 = '3' }) })
+            Achados = @([pscustomobject]@{ Categoria = 'Desempenho'; Severidade = 'Alto'; Achado = 'Upgrade de exemplo para testar o orcamento.'; Recomendacao = 'Troca por SSD de exemplo.'; Penalidade = 1.0; Upgrade = $true })
+            Tabelas = @(@{ Titulo = 'Tabela de exemplo'; Linhas = @([pscustomobject]@{ Coluna1 = 'A'; Coluna2 = 'B' }, [pscustomobject]@{ Coluna1 = '1'; Coluna2 = '2' }) })
+            Metricas = @{ TipoSistema = 'SSD'; LivreSistema = 40; LeituraSistema = 500; RamGB = 8; RamUso = 50; SlotsLivres = 1; BSOD = 0 }
         }
         $pasta = if ($Saida) { $Saida } else { $env:TEMP }
         New-Item -ItemType Directory -Path $pasta -Force | Out-Null
         try {
+            Show-Pagina 1; [System.Windows.Forms.Application]::DoEvents()
+            [IO.File]::WriteAllBytes((Join-Path $pasta 'pag1.jpg'), (Get-Print $form))
+            Show-Pagina 2; $lblPct.Text = '42%'; [System.Windows.Forms.Application]::DoEvents()
+            [IO.File]::WriteAllBytes((Join-Path $pasta 'pag2.jpg'), (Get-Print $form))
             Show-Resultado 'sistema'
-            [System.Windows.Forms.Application]::DoEvents()
-            $cap = if ($Global:TabMap.ContainsKey('sistema')) { Get-Print $Global:TabMap['sistema'].Content } else { Get-Print }
-            [IO.File]::WriteAllBytes((Join-Path $pasta 'interface.jpg'), $cap)
-            $alt = if ($Global:TabMap.ContainsKey('sistema')) { $Global:TabMap['sistema'].Content.Height } else { 0 }
-            [IO.File]::WriteAllText((Join-Path $pasta 'altura.txt'), [string]$alt)
+            Build-LaudoResumo; Build-Orcamento; Show-Pagina 3; [System.Windows.Forms.Application]::DoEvents()
+            [IO.File]::WriteAllBytes((Join-Path $pasta 'interface.jpg'), (Get-Print $form))
+            [IO.File]::WriteAllText((Join-Path $pasta 'altura.txt'), [string]($Global:LaudoSum.Controls.Count * 100 + $pg3.Height))
         }
         catch { try { [IO.File]::WriteAllText((Join-Path $pasta 'erro_interface.txt'), ($_ | Out-String)) } catch {} }
         finally { $form.Close() }
