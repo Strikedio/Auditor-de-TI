@@ -21,6 +21,9 @@ irm https://raw.githubusercontent.com/Strikedio/Auditor-de-TI/main/run.ps1 | iex
 
 Ele baixa a versão mais recente para a pasta temporária e abre o programa (confirme a permissão de Administrador). Os relatórios vão para `Documentos\AuditoriasTI` do computador. Copie a pasta do relatório e apague-a depois, se não quiser deixar nada na máquina do cliente.
 
+## Orçamento com os seus preços
+Na tela de Atendimento há o botão **Tabela de preços**: você configura uma vez os seus valores (peça + serviço) para cada tipo de upgrade — SSD, memória, troca de HD, bateria, limpeza, etc. Esses valores já vêm **preenchidos** no orçamento do laudo quando o upgrade aparece, e você ainda pode ajustar por cliente. Os preços ficam salvos em `precos.json` (na pasta de dados, no modo pendrive, ou em `%APPDATA%\AuditorTI` no modo instalado).
+
 ## Compatibilidade
 Funciona em Windows 10 e 11 e em Windows Server (2016, 2019, 2022 e mais recentes), em instalação normal. Em **Server Core** (sem interface gráfica), rode em modo texto, que gera o relatório sem janela:
 

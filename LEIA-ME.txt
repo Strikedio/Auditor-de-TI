@@ -21,7 +21,12 @@ COMO USAR
                                CHKDSK, Windows Update, limpeza etc.
        Otimizar Windows     -> ajustes do modo Standard do WinUtil
        Ativação do Windows  -> ativa com a chave da placa ou chave comprada
-  9. Gere o relatório em PDF.
+  9. Na tela de Laudo, aba Orcamento, confira/ajuste os precos e gere o PDF.
+
+TABELA DE PRECOS (seus valores)
+  Na tela de Atendimento, botao 'Tabela de precos': configure uma vez os
+  seus precos por tipo de upgrade (SSD, memoria, bateria, limpeza...).
+  Eles ja vem preenchidos no orcamento; da para ajustar por cliente.
      Para mudar as margens, gere de novo com "Gerar relatório PDF",
      sem refazer os testes.
 

@@ -20,7 +20,7 @@ param(
     [switch]$Capturar           # (sem interface) faz a captura de pacotes no teste de rede
 )
 
-$Global:VersaoApp = '1.7.0'
+$Global:VersaoApp = '1.8.0'
 $ErrorActionPreference = 'Continue'
 try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop } catch {}
 
@@ -118,6 +118,27 @@ else {
     $Global:PastaRelatorios = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'AuditoriasTI'
 }
 $Global:CfgArq = Join-Path $Global:CfgDir 'config.json'
+$Global:PrecosArq = Join-Path $Global:CfgDir 'precos.json'
+# Tabela de preços do técnico (valores padrão por tipo de serviço). Palavras = regex p/ reconhecer o upgrade.
+$Global:CatalogoServicos = @(
+    @{ Chave = 'ssd'; Nome = 'SSD - troca / instalacao (peca + servico)'; Palavras = '(?i)\bSSD\b' }
+    @{ Chave = 'ram'; Nome = 'Memoria RAM - upgrade (pente + instalacao)'; Palavras = '(?i)mem[oó]ria|\bRAM\b|pente|dual channel' }
+    @{ Chave = 'hd'; Nome = 'Disco rigido (HD) - troca'; Palavras = '(?i)substituir o disco|disco.*falha|setor(es)? (defeituos|realocad|pendent)|SMART reprov|chkdsk /r' }
+    @{ Chave = 'bateria'; Nome = 'Bateria de notebook - troca'; Palavras = '(?i)bateria' }
+    @{ Chave = 'limpeza'; Nome = 'Limpeza interna + pasta termica'; Palavras = '(?i)ventila|limpeza|cooler|pasta t[eé]rmica|superaquec|operando quente|temperatura' }
+    @{ Chave = 'drivers'; Nome = 'Atualizacao de drivers'; Palavras = '(?i)\bdriver' }
+    @{ Chave = 'fonte'; Nome = 'Fonte / energia (troca ou nobreak)'; Palavras = '(?i)\bfonte\b|nobreak|energia el[eé]trica' }
+    @{ Chave = 'windows'; Nome = 'Reinstalacao do Windows'; Palavras = '(?i)reinstal|formata' }
+    @{ Chave = 'equip'; Nome = 'Substituicao do equipamento'; Palavras = '(?i)substitui.*equipamento|equipamento mais novo|processador.*(baixo|lento|limita)' }
+)
+$Global:Precos = @{}
+function Load-Precos {
+    if (Test-Path $Global:PrecosArq) { try { $o = Get-Content $Global:PrecosArq -Raw | ConvertFrom-Json; foreach ($pp in $o.PSObject.Properties) { $Global:Precos[$pp.Name] = [string]$pp.Value } } catch {} }
+}
+function Save-Precos { try { New-Item -ItemType Directory -Path $Global:CfgDir -Force | Out-Null; ($Global:Precos | ConvertTo-Json) | Set-Content -Path $Global:PrecosArq -Encoding UTF8 } catch {} }
+function Get-ServicoChave([string]$txt) { foreach ($c in $Global:CatalogoServicos) { if ($txt -match $c.Palavras) { return $c.Chave } }; return $null }
+function Get-PrecoPadrao([string]$achado, [string]$rec) { $ch = Get-ServicoChave ("$achado $rec"); if ($ch -and $Global:Precos[$ch]) { return [string]$Global:Precos[$ch] } return '' }
+Load-Precos
 
 # ---------------------------------------------------------------------
 # Funções auxiliares (injetadas em cada teste, que roda em segundo plano)
@@ -2126,6 +2147,7 @@ ul { margin: 1mm 0 2mm 5mm; padding-left: 3mm; } li { margin-bottom: 1mm; }
             $tg = switch ($o.Severidade) { 'Crítico' { @('tag-urg', 'Urgente') } 'Alto' { @('tag-rec', 'Recomendado') } 'Médio' { @('tag-plan', 'Planejar') } default { @('tag-opc', 'Opcional') } }
             $pv = ''
             if ($Info.Precos -and $Info.Precos.ContainsKey($o.Achado)) { $pv = [string]$Info.Precos[$o.Achado] }
+            if (-not $pv) { $pv = Get-PrecoPadrao $o.Achado $o.Recomendacao }
             if ($pv) { $nv = 0.0; if ([double]::TryParse(($pv -replace '[^0-9,.-]', '' -replace ',', '.'), [ref]$nv)) { $somaIni += $nv } }
             & $Wr "<tr><td><span class='tag $($tg[0])'>$($tg[1])</span></td><td><b>$(Esc $o.Achado)</b><br><span class='obs' style='font-style:normal'>$(Esc $o.Recomendacao)</span></td><td class='preco'><input class='pinput' type='text' inputmode='decimal' placeholder='0,00' value='$(Esc $pv)'></td></tr>"
         }
@@ -3314,11 +3336,12 @@ $pg1 = New-Object Windows.Forms.Panel; $pg1.Dock = 'Fill'; $pg1.BackColor = [Dra
 $pEsq.Dock = 'Left'; $pEsq.Width = 352
 $pInfo1 = New-Object Windows.Forms.Panel; $pInfo1.Dock = 'Fill'; $pInfo1.BackColor = [Drawing.Color]::White
 $l1t = New-Object Windows.Forms.Label; $l1t.Text = 'Novo atendimento'; $l1t.Font = New-Object Drawing.Font('Segoe UI', 15, [Drawing.FontStyle]::Bold); $l1t.ForeColor = $azul; $l1t.AutoSize = $true; $l1t.Location = New-Object Drawing.Point(18, 10)
+$btnPrecos = New-Object Windows.Forms.Button; $btnPrecos.Text = 'Tabela de precos'; $btnPrecos.Size = New-Object Drawing.Size(150, 28); $btnPrecos.Location = New-Object Drawing.Point(338, 12); $btnPrecos.FlatStyle = 'Flat'; $btnPrecos.Anchor = 'Top,Right'
 $l1d = New-Object Windows.Forms.Label; $l1d.Text = 'Preencha os dados ao lado, descreva a reclamacao do cliente e inicie a analise. O AuditorTI apenas le informacoes: nao instala, apaga nem altera nada.'; $l1d.Location = New-Object Drawing.Point(18, 46); $l1d.Size = New-Object Drawing.Size(470, 54); $l1d.ForeColor = [Drawing.Color]::FromArgb(70, 101, 129)
 $l1r = New-Object Windows.Forms.Label; $l1r.Text = 'Reclamacao do cliente / motivo da visita'; $l1r.Location = New-Object Drawing.Point(18, 108); $l1r.Size = New-Object Drawing.Size(470, 18); $l1r.Font = New-Object Drawing.Font('Segoe UI', 9, [Drawing.FontStyle]::Bold)
 $txtReclamacao = New-Object Windows.Forms.TextBox; $txtReclamacao.Multiline = $true; $txtReclamacao.Location = New-Object Drawing.Point(18, 128); $txtReclamacao.Size = New-Object Drawing.Size(478, 90); $txtReclamacao.ScrollBars = 'Vertical'
 $btnIniciar.Size = New-Object Drawing.Size(478, 48); $btnIniciar.Location = New-Object Drawing.Point(18, 232); $btnIniciar.Text = 'INICIAR ANALISE'
-$pInfo1.Controls.AddRange(@($l1t, $l1d, $l1r, $txtReclamacao, $btnIniciar))
+$pInfo1.Controls.AddRange(@($l1t, $btnPrecos, $l1d, $l1r, $txtReclamacao, $btnIniciar))
 $pg1.Controls.Add($pInfo1); $pg1.Controls.Add($pEsq)
 
 # ---- Pagina 2: Analise ----
@@ -3393,12 +3416,36 @@ function Build-Orcamento {
         $bt = New-Object Windows.Forms.Label; $bt.Text = $tag; $bt.Location = New-Object Drawing.Point(8, $yy); $bt.Size = New-Object Drawing.Size(86, 20); $bt.BackColor = $cor; $bt.ForeColor = 'White'; $bt.TextAlign = 'MiddleCenter'; $bt.Font = New-Object Drawing.Font('Segoe UI', 8, [Drawing.FontStyle]::Bold)
         $ds = New-Object Windows.Forms.Label; $ds.Text = $o.Achado; $ds.Location = New-Object Drawing.Point(100, $yy); $ds.Size = New-Object Drawing.Size(520, 34)
         $pr = New-Object Windows.Forms.TextBox; $pr.Location = New-Object Drawing.Point(630, $yy); $pr.Size = New-Object Drawing.Size(120, 24)
+        $pp = Get-PrecoPadrao $o.Achado $o.Recomendacao; if ($pp) { $pr.Text = $pp }
         $hp.Controls.AddRange(@($bt, $ds, $pr)); $Global:OrcCampos[$o.Achado] = $pr; $yy += 40
     }
     $tp.Controls.Add($hp); [void]$tabs.TabPages.Add($tp); $Global:TabOrc = $tp
 }
 function Get-OrcPrecos { $h = @{}; if ($Global:OrcCampos) { foreach ($k in $Global:OrcCampos.Keys) { $v = $Global:OrcCampos[$k].Text.Trim(); if ($v) { $h[$k] = $v } } }; return $h }
 
+function Show-TabelaPrecos {
+    $dlg = New-Object Windows.Forms.Form
+    $dlg.Text = 'Tabela de precos (seus valores)'; $dlg.Size = New-Object Drawing.Size(566, 520)
+    $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false; $dlg.Font = New-Object Drawing.Font('Segoe UI', 9)
+    $lb = New-Object Windows.Forms.Label; $lb.Text = 'Informe o SEU preco (peca + servico) para cada tipo de upgrade. Esses valores ja vem preenchidos no orcamento; voce ainda pode ajustar por cliente. Deixe em branco o que nao quiser.'; $lb.Location = New-Object Drawing.Point(14, 10); $lb.Size = New-Object Drawing.Size(524, 50)
+    $campos = @{}; $yy = 66
+    foreach ($c in $Global:CatalogoServicos) {
+        $l = New-Object Windows.Forms.Label; $l.Text = $c.Nome; $l.Location = New-Object Drawing.Point(16, ($yy + 3)); $l.Size = New-Object Drawing.Size(360, 20)
+        $rs = New-Object Windows.Forms.Label; $rs.Text = 'R$'; $rs.Location = New-Object Drawing.Point(386, ($yy + 3)); $rs.Size = New-Object Drawing.Size(22, 20)
+        $tb = New-Object Windows.Forms.TextBox; $tb.Location = New-Object Drawing.Point(410, $yy); $tb.Size = New-Object Drawing.Size(120, 24)
+        if ($Global:Precos[$c.Chave]) { $tb.Text = [string]$Global:Precos[$c.Chave] }
+        $dlg.Controls.AddRange(@($l, $rs, $tb)); $campos[$c.Chave] = $tb; $yy += 34
+    }
+    $bOk = New-Object Windows.Forms.Button; $bOk.Text = 'Salvar precos'; $bOk.Size = New-Object Drawing.Size(130, 32); $bOk.Location = New-Object Drawing.Point(286, ($yy + 10)); $bOk.DialogResult = 'OK'
+    $bNo = New-Object Windows.Forms.Button; $bNo.Text = 'Cancelar'; $bNo.Size = New-Object Drawing.Size(100, 32); $bNo.Location = New-Object Drawing.Point(428, ($yy + 10)); $bNo.DialogResult = 'Cancel'
+    $dlg.Controls.AddRange(@($lb, $bOk, $bNo)); $dlg.AcceptButton = $bOk; $dlg.CancelButton = $bNo
+    if ($dlg.ShowDialog($form) -eq 'OK') {
+        foreach ($c in $Global:CatalogoServicos) { $v = $campos[$c.Chave].Text.Trim(); if ($v) { $Global:Precos[$c.Chave] = $v } elseif ($Global:Precos.ContainsKey($c.Chave)) { [void]$Global:Precos.Remove($c.Chave) } }
+        Save-Precos
+        if ($Global:TabOrc -and $Global:Resultados.Count) { Build-Orcamento }
+    }
+}
+$btnPrecos.Add_Click({ Show-TabelaPrecos })
 $btnNovo.Add_Click({ Show-Pagina 1; $txtCliente.Focus() })
 Show-Pagina 1
 
