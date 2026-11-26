@@ -51,7 +51,7 @@ try {
     Copy-Item $src $port
     Copy-Item (Join-Path $raiz 'LEIA-ME.txt') $port
     Copy-Item (Join-Path $raiz 'Executar.bat') $port
-    Set-Content -Path (Join-Path $port 'portable.txt') -Value 'Este arquivo ativa o modo portátil: configurações e relatórios ficam nesta pasta.' -Encoding UTF8
+    Set-Content -Path (Join-Path $port 'portable.txt') -Value 'Este arquivo forca o modo portatil: laudos (pasta Laudos) e configuracoes (pasta dados) ficam nesta pasta.' -Encoding UTF8
     Compress-Archive -Path (Join-Path $port '*') -DestinationPath (Join-Path $dist "AuditorTI-Portatil-$Versao.zip") -Force
 
     # --- 3. Instalador (Inno Setup) ---

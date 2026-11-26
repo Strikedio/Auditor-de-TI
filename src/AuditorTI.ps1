@@ -20,7 +20,7 @@ param(
     [switch]$Capturar           # (sem interface) faz a captura de pacotes no teste de rede
 )
 
-$Global:VersaoApp = '1.9.0'
+$Global:VersaoApp = '1.9.1'
 $ErrorActionPreference = 'Continue'
 try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop } catch {}
 
@@ -100,18 +100,25 @@ $Global:UltimaPasta = $null
 # ---------------------------------------------------------------------
 $Global:BaseDir = $PSScriptRoot
 if (-not $Global:BaseDir) { $Global:BaseDir = [System.AppDomain]::CurrentDomain.BaseDirectory.TrimEnd('\') }
+# Portátil sempre que roda de uma pasta avulsa (pendrive, Downloads, Desktop...)
+# e consegue gravar ali. Só é 'instalado' quando esta em Arquivos de Programas.
 $Global:Portatil = $false
 try {
-    $tipoDrv = (New-Object System.IO.DriveInfo ([System.IO.Path]::GetPathRoot($Global:BaseDir))).DriveType
-    if ((Test-Path (Join-Path $Global:BaseDir 'portable.txt')) -or [string]$tipoDrv -eq 'Removable') {
-        $teste = Join-Path $Global:BaseDir ('.gravacao_' + [guid]::NewGuid().ToString('N'))
+    $forca = Test-Path (Join-Path $Global:BaseDir 'portable.txt')
+    $instalado = $false
+    foreach ($d in @([Environment]::GetFolderPath('ProgramFiles'), [Environment]::GetFolderPath('ProgramFilesX86'))) {
+        if ($d -and $Global:BaseDir.TrimEnd('').ToLower().StartsWith($d.TrimEnd('').ToLower())) { $instalado = $true }
+    }
+    if ($forca -or -not $instalado) {
+        $teste = Join-Path $Global:BaseDir ('.w_' + [guid]::NewGuid().ToString('N'))
         [IO.File]::WriteAllText($teste, 'ok'); Remove-Item $teste -Force
         $Global:Portatil = $true
     }
 } catch { $Global:Portatil = $false }
 if ($Global:Portatil) {
     $Global:CfgDir = Join-Path $Global:BaseDir 'dados'
-    $Global:PastaRelatorios = Join-Path $Global:BaseDir 'Relatorios'
+    $Global:PastaRelatorios = Join-Path $Global:BaseDir 'Laudos'
+    try { New-Item -ItemType Directory -Path $Global:PastaRelatorios -Force | Out-Null } catch {}
 }
 else {
     $Global:CfgDir = Join-Path $env:APPDATA 'AuditorTI'
@@ -3338,10 +3345,10 @@ $pEsq.Dock = 'Left'; $pEsq.Width = 352
 $pInfo1 = New-Object Windows.Forms.Panel; $pInfo1.Dock = 'Fill'; $pInfo1.BackColor = [Drawing.Color]::White
 $l1t = New-Object Windows.Forms.Label; $l1t.Text = 'Novo atendimento'; $l1t.Font = New-Object Drawing.Font('Segoe UI', 15, [Drawing.FontStyle]::Bold); $l1t.ForeColor = $azul; $l1t.AutoSize = $true; $l1t.Location = New-Object Drawing.Point(18, 10)
 $btnPrecos = New-Object Windows.Forms.Button; $btnPrecos.Text = 'Tabela de precos'; $btnPrecos.Size = New-Object Drawing.Size(150, 28); $btnPrecos.Location = New-Object Drawing.Point(338, 12); $btnPrecos.FlatStyle = 'Flat'; $btnPrecos.Anchor = 'Top,Right'
-$l1d = New-Object Windows.Forms.Label; $l1d.Text = 'Preencha os dados ao lado, descreva a reclamacao do cliente e inicie a analise. O AuditorTI apenas le informacoes: nao instala, apaga nem altera nada.'; $l1d.Location = New-Object Drawing.Point(18, 46); $l1d.Size = New-Object Drawing.Size(470, 54); $l1d.ForeColor = [Drawing.Color]::FromArgb(70, 101, 129)
-$l1r = New-Object Windows.Forms.Label; $l1r.Text = 'Reclamacao do cliente / motivo da visita'; $l1r.Location = New-Object Drawing.Point(18, 108); $l1r.Size = New-Object Drawing.Size(470, 18); $l1r.Font = New-Object Drawing.Font('Segoe UI', 9, [Drawing.FontStyle]::Bold)
-$txtReclamacao = New-Object Windows.Forms.TextBox; $txtReclamacao.Multiline = $true; $txtReclamacao.Location = New-Object Drawing.Point(18, 128); $txtReclamacao.Size = New-Object Drawing.Size(478, 90); $txtReclamacao.ScrollBars = 'Vertical'
-$btnIniciar.Size = New-Object Drawing.Size(478, 48); $btnIniciar.Location = New-Object Drawing.Point(18, 232); $btnIniciar.Text = 'INICIAR ANALISE'
+$l1d = New-Object Windows.Forms.Label; $l1d.Text = ('Preencha os dados ao lado, descreva a reclamacao do cliente e inicie a analise. O AuditorTI apenas le informacoes: nao instala, apaga nem altera nada.' + [Environment]::NewLine + 'Os laudos sao salvos em: ' + $Global:PastaRelatorios); $l1d.Location = New-Object Drawing.Point(18, 46); $l1d.Size = New-Object Drawing.Size(470, 70); $l1d.ForeColor = [Drawing.Color]::FromArgb(70, 101, 129)
+$l1r = New-Object Windows.Forms.Label; $l1r.Text = 'Reclamacao do cliente / motivo da visita'; $l1r.Location = New-Object Drawing.Point(18, 120); $l1r.Size = New-Object Drawing.Size(470, 18); $l1r.Font = New-Object Drawing.Font('Segoe UI', 9, [Drawing.FontStyle]::Bold)
+$txtReclamacao = New-Object Windows.Forms.TextBox; $txtReclamacao.Multiline = $true; $txtReclamacao.Location = New-Object Drawing.Point(18, 140); $txtReclamacao.Size = New-Object Drawing.Size(478, 84); $txtReclamacao.ScrollBars = 'Vertical'
+$btnIniciar.Size = New-Object Drawing.Size(478, 48); $btnIniciar.Location = New-Object Drawing.Point(18, 236); $btnIniciar.Text = 'INICIAR ANALISE'
 $pInfo1.Controls.AddRange(@($l1t, $btnPrecos, $l1d, $l1r, $txtReclamacao, $btnIniciar))
 $pg1.Controls.Add($pInfo1); $pg1.Controls.Add($pEsq)
 

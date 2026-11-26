@@ -10,7 +10,7 @@ Configurações em `%APPDATA%\AuditorTI` e relatórios em `Documentos\Auditorias
 
 ### 2. Pendrive (modo portátil)
 Baixe o **`AuditorTI-Portatil-x.x.x.zip`** em [Releases](https://github.com/Strikedio/Auditor-de-TI/releases/latest), extraia no pendrive e execute o `AuditorTI.exe`.
-No pendrive, **tudo fica no próprio pendrive**: o papel timbrado, as configurações (pasta `dados`) e os relatórios (pasta `Relatorios`). O modo portátil é ativado sozinho quando o programa está num pendrive ou quando existe o arquivo `portable.txt` ao lado dele.
+No pendrive, **tudo fica no próprio pendrive**: o papel timbrado, as configurações (pasta `dados`) e os laudos (pasta `Laudos`). O modo portátil é ativado sozinho sempre que o programa roda de uma pasta avulsa (pendrive, Downloads, Desktop) e consegue gravar ali; só entra em modo instalado quando foi instalado em Arquivos de Programas. A pasta `Laudos` é criada ao abrir.
 
 ### 3. Direto do GitHub (perdi o pendrive)
 Em qualquer computador com internet, abra o **PowerShell** e cole:

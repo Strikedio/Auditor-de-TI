@@ -23,6 +23,14 @@ COMO USAR
        Ativação do Windows  -> ativa com a chave da placa ou chave comprada
   9. Na tela de Laudo, aba Orcamento, confira/ajuste os precos e gere o PDF.
 
+USAR DIRETO DO PENDRIVE
+  Copie o AuditorTI.exe (ou extraia o AuditorTI-Portatil.zip) para o pendrive
+  e execute de la. O programa detecta que esta numa pasta avulsa e passa a
+  salvar tudo no proprio pendrive: os laudos na pasta 'Laudos' e as
+  configuracoes/timbrado na pasta 'dados'. A pasta 'Laudos' e criada ao abrir.
+  (So entra em 'modo instalado', salvando em Documentos, quando foi instalado
+   em Arquivos de Programas pelo instalador.)
+
 TABELA DE PRECOS (seus valores)
   Na tela de Atendimento, botao 'Tabela de precos': configure uma vez os
   seus precos por tipo de upgrade (SSD, memoria, bateria, limpeza...).
@@ -33,7 +41,7 @@ TABELA DE PRECOS (seus valores)
 ONDE FICAM OS ARQUIVOS
   Modo portátil (pendrive ou com portable.txt na pasta):
      dados\        -> configurações e papel timbrado
-     Relatorios\   -> relatórios
+     Laudos\       -> laudos (um subfolder por atendimento)
   Modo instalado:
      %APPDATA%\AuditorTI  e  Documentos\AuditoriasTI
 
