@@ -20,7 +20,7 @@ param(
     [switch]$Capturar           # (sem interface) faz a captura de pacotes no teste de rede
 )
 
-$Global:VersaoApp = '1.9.1'
+$Global:VersaoApp = '1.9.2'
 $ErrorActionPreference = 'Continue'
 try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop } catch {}
 
@@ -2441,18 +2441,16 @@ function New-GridBase {
     $g = New-Object Windows.Forms.DataGridView
     $g.ReadOnly = $true; $g.AllowUserToAddRows = $false; $g.AllowUserToResizeRows = $false; $g.RowHeadersVisible = $false
     $g.BackgroundColor = [Drawing.Color]::White; $g.BorderStyle = 'FixedSingle'; $g.ScrollBars = 'None'
-    $g.AutoSizeRowsMode = 'AllCells'; $g.AutoSizeColumnsMode = 'Fill'; $g.SelectionMode = 'FullRowSelect'
+    $g.AutoSizeRowsMode = 'None'; $g.RowTemplate.Height = 22; $g.AutoSizeColumnsMode = 'Fill'; $g.SelectionMode = 'FullRowSelect'
     $g.ColumnHeadersHeightSizeMode = 'DisableResizing'; $g.EnableHeadersVisualStyles = $false
     $g.ColumnHeadersDefaultCellStyle.Font = New-Object Drawing.Font('Segoe UI', 8.5, [Drawing.FontStyle]::Bold)
     $g.ColumnHeadersDefaultCellStyle.BackColor = [Drawing.Color]::FromArgb(18, 52, 86); $g.ColumnHeadersDefaultCellStyle.ForeColor = [Drawing.Color]::White
-    $g.DefaultCellStyle.Font = New-Object Drawing.Font('Segoe UI', 8.5); $g.DefaultCellStyle.WrapMode = 'True'
+    $g.DefaultCellStyle.Font = New-Object Drawing.Font('Segoe UI', 8.5); $g.DefaultCellStyle.WrapMode = 'False'
     $g.AlternatingRowsDefaultCellStyle.BackColor = [Drawing.Color]::FromArgb(240, 244, 248)
     return $g
 }
-function Set-GridHeight($g, [int]$maxH = 560) {
-    try { $g.PerformLayout() } catch {}
-    $h = $g.ColumnHeadersHeight + 3
-    foreach ($row in $g.Rows) { $h += $row.Height }
+function Set-GridHeight($g, [int]$maxH = 520) {
+    $h = $g.ColumnHeadersHeight + 3 + ($g.Rows.Count * 22)
     if ($h -gt $maxH) { $g.ScrollBars = 'Vertical'; $h = $maxH }
     $g.Height = [math]::Max(40, $h)
 }
@@ -2512,9 +2510,9 @@ function Fill-TabTeste([string]$id) {
     foreach ($tb in $r.Tabelas) {
         $rows = @($tb.Linhas); if (-not $rows.Count) { continue }
         $y = Add-Titulo $content 8 $y $W ("{0}  ({1} registro(s))" -f $tb.Titulo, $rows.Count)
-        $g = Add-GridDados $content 8 $y $W (@($rows | Select-Object -First 100)) $null
+        $g = Add-GridDados $content 8 $y $W (@($rows | Select-Object -First 40)) $null
         Set-GridHeight $g; $y += $g.Height + 6
-        if ($rows.Count -gt 100) { $y = (Add-WrapLabel $content 8 $y $W ("... e mais {0} registro(s) no relatório PDF." -f ($rows.Count - 100)) 8 ([Drawing.Color]::DimGray)) + 6 }
+        if ($rows.Count -gt 40) { $y = (Add-WrapLabel $content 8 $y $W ("... e mais {0} registro(s) no relatório PDF." -f ($rows.Count - 40)) 8 ([Drawing.Color]::DimGray)) + 6 }
         $y += 6
     }
     $content.Width = $W + 16; $content.Height = $y + 8
@@ -3308,7 +3306,7 @@ $tabResumo.Controls.Add($lv)
 $lblGrid = New-Object Windows.Forms.Label; $lblGrid.Dock = 'Top'; $lblGrid.Height = 22; $lblGrid.Text = 'Resultados das ações'; $lblGrid.TextAlign = 'BottomLeft'; $lblGrid.Font = New-Object Drawing.Font('Segoe UI', 9, [Drawing.FontStyle]::Bold)
 $dgv = New-Object Windows.Forms.DataGridView; $dgv.Dock = 'Fill'; $dgv.ReadOnly = $true; $dgv.AllowUserToAddRows = $false; $dgv.AllowUserToDeleteRows = $false; $dgv.RowHeadersVisible = $false
 $dgv.SelectionMode = 'FullRowSelect'; $dgv.BackgroundColor = [Drawing.Color]::White; $dgv.BorderStyle = 'FixedSingle'
-$dgv.DefaultCellStyle.WrapMode = 'True'; $dgv.AutoSizeRowsMode = 'AllCells'; $dgv.ColumnHeadersDefaultCellStyle.Font = New-Object Drawing.Font('Segoe UI', 9, [Drawing.FontStyle]::Bold)
+$dgv.DefaultCellStyle.WrapMode = 'False'; $dgv.AutoSizeRowsMode = 'None'; $dgv.RowTemplate.Height = 22; $dgv.ColumnHeadersDefaultCellStyle.Font = New-Object Drawing.Font('Segoe UI', 9, [Drawing.FontStyle]::Bold)
 [void]$dgv.Columns.Add('c1', 'Etapa'); [void]$dgv.Columns.Add('c2', 'Resultado'); [void]$dgv.Columns.Add('c3', 'Situação')
 $dgv.Columns[0].Width = 280; $dgv.Columns[1].AutoSizeMode = 'Fill'; $dgv.Columns[2].Width = 90
 $tabAcoes = New-Object Windows.Forms.TabPage; $tabAcoes.Text = 'Manutenção'; $tabAcoes.BackColor = [Drawing.Color]::White; $tabAcoes.Padding = New-Object Windows.Forms.Padding(3)
@@ -3604,8 +3602,17 @@ $btnIniciar.Add_Click({
         $lblStatus.Text = "Concluído!  Desempenho $(Format-Nota $nt.Desempenho)/10  |  Segurança $(Format-Nota $nt.Seguranca)/10"
         $lblPct.Text = '100%'
         Write-LogUI $lblStatus.Text
-        Build-LaudoResumo; Build-Orcamento
+        Write-LogUI 'Montando o resumo do laudo...'
+        [System.Windows.Forms.Application]::DoEvents()
+        try { Build-LaudoResumo } catch { Write-LogUI "Falha no resumo: $($_.Exception.Message)" }
+        Write-LogUI 'Montando o orçamento...'
+        [System.Windows.Forms.Application]::DoEvents()
+        try { Build-Orcamento } catch { Write-LogUI "Falha no orçamento: $($_.Exception.Message)" }
+        if ($Global:TabOrc) { try { $tabs.SelectedTab = $Global:TabOrc } catch {} }
+        Write-LogUI 'Abrindo o laudo...'
+        [System.Windows.Forms.Application]::DoEvents()
         Show-Pagina 3
+        Write-LogUI 'Laudo pronto.'
     }
 })
 
