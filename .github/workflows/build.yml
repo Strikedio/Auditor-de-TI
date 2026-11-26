@@ -51,11 +51,20 @@ jobs:
           if ($txt -match '([0-9]+) erro\(s\) em') { Write-Host "Teste de RAM: $($matches[1]) erro(s)" }
           $rel = Get-ChildItem $saida -Recurse -Filter 'relatorio.html' | Select-Object -First 1
           $html = Get-Content $rel.FullName -Raw
-          foreach ($marca in @('Laudo do computador','Primeiro, o mais importante','geral da m','amento sugerido','Mapa de leitura','Anexo t')) {
+          foreach ($marca in @('LAUDO T','Laudo do computador','Primeiro, o mais importante','geral da m','amento sugerido','Mapa de leitura')) {
             if ($html -notmatch [regex]::Escape($marca)) { Write-Host "Laudo sem a secao: $marca"; exit 1 }
           }
           if ($html -notmatch 'class=.cel cel-') { Write-Host 'Mapa de setores nao foi desenhado'; exit 1 }
-          Write-Host 'Laudo novo (estilo cartoes) OK'
+          if ($html -match 'Detalhamento por') { Write-Host 'O laudo do cliente ainda contem o detalhamento tecnico (deveria ir ao parecer)'; exit 1 }
+          Write-Host 'Laudo do cliente (enxuto) OK'
+          $par = Get-ChildItem $saida -Recurse -Filter 'parecer.html' | Select-Object -First 1
+          if (-not $par) { Write-Host 'Parecer tecnico nao foi gerado'; exit 1 }
+          $phtml = Get-Content $par.FullName -Raw
+          foreach ($marca in @('PARECER T','Detalhamento por','Metodologia','Integridade')) {
+            if ($phtml -notmatch [regex]::Escape($marca)) { Write-Host "Parecer sem a secao: $marca"; exit 1 }
+          }
+          if ($phtml -match 'amento sugerido') { Write-Host 'O parecer nao deveria repetir o orcamento do cliente'; exit 1 }
+          Write-Host 'Parecer tecnico (detalhado) OK'
 
 
       - name: Testar o script de desfazer

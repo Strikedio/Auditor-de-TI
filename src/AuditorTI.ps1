@@ -20,7 +20,7 @@ param(
     [switch]$Capturar           # (sem interface) faz a captura de pacotes no teste de rede
 )
 
-$Global:VersaoApp = '1.9.2'
+$Global:VersaoApp = '2.0.0'
 $ErrorActionPreference = 'Continue'
 try { Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force -ErrorAction Stop } catch {}
 
@@ -312,6 +312,7 @@ function Invoke-Etapa($R, [string]$Nome, [scriptblock]$Bloco) {
     if ($msg -like 'Falha*' -or $msg -like 'ATENÇÃO*') { $st = 'Atenção' }
     Add-Item $R $Nome ("{0} ({1:N0} s)" -f $msg, $sw.Elapsed.TotalSeconds) $st
     Log "   $Nome -> $msg"
+    try { if ($Sync) { $Sync['Prog'] = [int]$Sync['Prog'] + 1 } } catch {}
 }
 
 # Últimas linhas úteis da saída de um comando
@@ -1947,7 +1948,7 @@ function ConvertTo-TabelaHtml($linhas, [int]$max = 30) {
 function Mget([string]$id, [string]$k) { if ($Global:Resultados.Contains($id)) { $m = $Global:Resultados[$id].Metricas; if ($m -and $m.Contains($k)) { return $m[$k] } } return $null }
 function Get-SitArea([string]$id) { if (-not $Global:Resultados.Contains($id)) { return 'info' }; Get-Classe $Global:Resultados[$id].Situacao }
 
-function New-RelatorioHtml($Info, $Notas, [string]$HashEvid, $HashesPrints) {
+function New-RelatorioHtml($Info, $Notas, [string]$HashEvid, $HashesPrints, [string]$Tipo = 'laudo') {
     $sb = New-Object System.Text.StringBuilder
     $Wr = { param($t) [void]$sb.Append($t) }
     $topo = [int]$Info.MargemTopo; $base = [int]$Info.MargemBase; $lado = [int]$Info.MargemLado
@@ -2056,7 +2057,12 @@ ul { margin: 1mm 0 2mm 5mm; padding-left: 3mm; } li { margin-bottom: 1mm; }
     & $Wr "<table class='pagina'><thead><tr><td><div class='esp-topo'></div></td></tr></thead><tfoot><tr><td><div class='esp-base'></div></td></tr></tfoot><tbody><tr><td class='conteudo'>"
 
     # ---------- Capa / identificação ----------
-    & $Wr "<h1>RELATÓRIO DE AUDITORIA TÉCNICA</h1><div class='sub'>Estação de trabalho Windows — diagnóstico de desempenho e segurança</div>"
+    if ($Tipo -eq 'parecer') {
+        & $Wr "<h1>PARECER TÉCNICO</h1><div class='sub'>Documento técnico detalhado — uso interno da equipe técnica</div>"
+    }
+    else {
+        & $Wr "<h1>LAUDO TÉCNICO</h1><div class='sub'>Via do cliente — resumo do diagnóstico do equipamento</div>"
+    }
     & $Wr "<div class='ident'>"
     & $Wr "<div><b>Cliente:</b> $(Esc $Info.Cliente)</div><div><b>Nº OS / chamado:</b> $(Esc $Info.OS)</div>"
     & $Wr "<div><b>Técnico responsável:</b> $(Esc $Info.Tecnico)</div><div><b>ID do relatório:</b> $(Esc $Global:IdAud)</div>"
@@ -2066,8 +2072,9 @@ ul { margin: 1mm 0 2mm 5mm; padding-left: 3mm; } li { margin-bottom: 1mm; }
     & $Wr "<div><b>Processador:</b> $(Esc $res.CPU)</div><div><b>Memória:</b> $(Esc $res.RAM)</div>"
     & $Wr "</div>"
 
-    # ========== LAUDO (resumo para o cliente) ==========
     $cnt = $Notas.Contagem
+    # ========== LAUDO (resumo para o cliente) ==========
+    if ($Tipo -eq 'laudo') {
     $nCrit = [int]$cnt['Crítico']; $nAlto = [int]$cnt['Alto']
     $areasOk = 0; $areasAt = 0
     foreach ($k in $Global:Resultados.Keys) {
@@ -2163,9 +2170,10 @@ ul { margin: 1mm 0 2mm 5mm; padding-left: 3mm; } li { margin-bottom: 1mm; }
         & $Wr "</tbody></table><div class='total'>Total: <span id='orctotal'>$totIni</span></div></div>"
     }
     else { & $Wr "<p>Nenhum upgrade necessário no momento. O equipamento atende ao uso atual.</p>" }
+    } # ----- fim do LAUDO -----
 
-    # ---------- Notas (início do anexo técnico) ----------
-    & $Wr "<h2 class='quebra'>Anexo técnico — avaliação detalhada</h2>"
+    # ========== PARECER TÉCNICO (detalhado) ==========
+    if ($Tipo -eq 'parecer') {
     # ---------- Notas ----------
     $degD = [int]($Notas.Desempenho * 36); $degS = [int]($Notas.Seguranca * 36)
     & $Wr "<h2>Avaliação geral</h2><div class='notas'>"
@@ -2269,6 +2277,7 @@ ul { margin: 1mm 0 2mm 5mm; padding-left: 3mm; } li { margin-bottom: 1mm; }
     if ($HashesPrints -and @($HashesPrints).Count) { & $Wr "<h3>Hash das capturas de tela</h3>"; & $Wr (ConvertTo-TabelaHtml $HashesPrints 50) }
     $ult = @($Global:LogGeral | Select-Object -Last 120)
     & $Wr "<h3>Registro de execução (últimas $($ult.Count) linhas)</h3><div class='log'>$(Esc ($ult -join "`n"))</div>"
+    } # ----- fim do PARECER TÉCNICO -----
 
     # ---------- Assinaturas ----------
     & $Wr "<div class='assin'><div>$(Esc $Info.Tecnico)<br>Técnico responsável</div><div>$(Esc $Info.Cliente)<br>Cliente / responsável pelo equipamento</div></div>"
@@ -2339,12 +2348,24 @@ function New-Relatorio($Info) {
         [IO.File]::WriteAllText((Join-Path $dir 'desfazer_alteracoes.ps1'), $sr.ToString(), (New-Object System.Text.UTF8Encoding $true))
     }
 
-    $html = New-RelatorioHtml $Info $notas $hash $hp
+    $enc = New-Object System.Text.UTF8Encoding $true
+    $sel = $Global:Inicio.ToString('yyyyMMdd_HHmm')
+
+    # Laudo do cliente (resumo)
+    $htmlLaudo = New-RelatorioHtml $Info $notas $hash $hp 'laudo'
     $htmlArq = Join-Path $dir 'relatorio.html'
-    [IO.File]::WriteAllText($htmlArq, $html, (New-Object System.Text.UTF8Encoding $true))
-    $pdfArq = Join-Path $dir ("Relatorio_Auditoria_{0}_{1}.pdf" -f $limpa, $Global:Inicio.ToString('yyyyMMdd_HHmm'))
+    [IO.File]::WriteAllText($htmlArq, $htmlLaudo, $enc)
+    $pdfArq = Join-Path $dir ("Laudo_{0}_{1}.pdf" -f $limpa, $sel)
     $okPdf = Export-Pdf $htmlArq $pdfArq
-    return @{ Pasta = $dir; Html = $htmlArq; Pdf = $(if ($okPdf) { $pdfArq } else { $null }); Hash = $hash }
+
+    # Parecer técnico (detalhado)
+    $htmlParecer = New-RelatorioHtml $Info $notas $hash $hp 'parecer'
+    $htmlParArq = Join-Path $dir 'parecer.html'
+    [IO.File]::WriteAllText($htmlParArq, $htmlParecer, $enc)
+    $pdfParArq = Join-Path $dir ("Parecer_Tecnico_{0}_{1}.pdf" -f $limpa, $sel)
+    $okPar = Export-Pdf $htmlParArq $pdfParArq
+
+    return @{ Pasta = $dir; Html = $htmlArq; Pdf = $(if ($okPdf) { $pdfArq } else { $null }); ParecerHtml = $htmlParArq; ParecerPdf = $(if ($okPar) { $pdfParArq } else { $null }); Hash = $hash }
 }
 
 # =====================================================================
@@ -2400,6 +2421,10 @@ function Invoke-Teste($t, $item) {
         Update-Log
         if ($item) { $item.SubItems[2].Text = ('{0:N0} s' -f $sw.Elapsed.TotalSeconds) }
         elseif ($Global:StatusBase -and $lblStatus) { $lblStatus.Text = ('{0}  ({1:mm\:ss})' -f $Global:StatusBase, $sw.Elapsed) }
+        if ($prog -and [int]$Global:Sync['ProgMax'] -gt 0) {
+            $pm = [int]$Global:Sync['ProgMax']; $pv = [math]::Min([int]$Global:Sync['Prog'], $pm)
+            try { if ($prog.Maximum -ne $pm) { $prog.Maximum = $pm }; $prog.Value = $pv; if ($lblPct) { $lblPct.Text = ('{0}%' -f [int]($pv * 100 / $pm)) } } catch {}
+        }
         [System.Windows.Forms.Application]::DoEvents()
         Start-Sleep -Milliseconds 60
         if ($Global:Cancelar) { break }
@@ -2675,6 +2700,7 @@ $Global:TweaksPadrao = @(
 $Global:CodigoOtimizar = {
     $R = New-R
     $sel = @($Cfg.Selecao)
+    try { $Sync['Prog'] = 0; $Sync['ProgMax'] = @($sel).Count } catch {}
     Log 'Otimização do Windows - preset Standard (WinUtil)'
     if ($sel -contains 'restauracao') { Invoke-Etapa $R 'Ponto de restauração - criar' { New-PontoRestauracao $R 'AuditorTI - antes da otimizacao' } }
     if ($sel -contains 'atividade') {
@@ -2818,6 +2844,7 @@ function Get-ListaCorrecoes {
 $Global:CodigoCorrigir = {
     $R = New-R
     $sel = @($Cfg.Selecao)
+    try { $Sync['Prog'] = 0; $Sync['ProgMax'] = @($sel).Count } catch {}
     $drv = $env:SystemDrive
     Log 'Solucionar problemas - início'
     if ($sel -contains 'restauracao') { Invoke-Etapa $R 'Ponto de restauração' { New-PontoRestauracao $R 'AuditorTI - antes dos reparos' } }
@@ -3012,38 +3039,6 @@ $Global:CodigoCorrigir = {
     $R
 }
 
-# ---------------------------------------------------------------------
-# Ativação LEGÍTIMA do Windows (chave OEM gravada na placa-mãe ou chave
-# de produto informada). Não contorna o licenciamento da Microsoft.
-# ---------------------------------------------------------------------
-$Global:CodigoAtivar = {
-    $R = New-R
-    $cs = "$env:windir\System32\cscript.exe"; $slmgr = "$env:windir\System32\slmgr.vbs"
-    $stMap = @{ 0 = 'Não licenciado'; 1 = 'Ativado'; 2 = 'Período de carência'; 3 = 'Carência adicional'; 4 = 'Não original'; 5 = 'Notificação'; 6 = 'Carência estendida' }
-    $ler = { Get-CimInstance SoftwareLicensingProduct -Filter "ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL" | Select-Object -First 1 }
-    $antes = & $ler
-    $stAntes = $stMap[[int]$antes.LicenseStatus]
-    $chave = [string]$Cfg.Chave; $Cfg.Chave = $null
-    $masc = ''
-    if ($chave) {
-        $masc = 'XXXXX-XXXXX-XXXXX-XXXXX-' + $chave.Substring($chave.Length - 5)
-        Invoke-Etapa $R "Instalar chave de produto ($masc)" {
-            $o = Invoke-Cmd $cs "//nologo `"$slmgr`" /ipk $chave" 120000
-            $o = $o.Replace($chave, $masc)
-            if ($global:UltimoCodigo -ne 0 -or $o -match '(?i)erro|error|0x8') { "Falha: $(Get-Resumo $o 1)" } else { 'Chave instalada' }
-        }
-    }
-    Invoke-Etapa $R 'Ativar junto à Microsoft (slmgr /ato)' {
-        $o = Invoke-Cmd $cs "//nologo `"$slmgr`" /ato" 180000
-        if ($chave) { $o = $o.Replace($chave, $masc) }
-        Get-Resumo $o 1
-    }
-    $dep = & $ler
-    $stDep = $stMap[[int]$dep.LicenseStatus]
-    Add-Item $R 'Situação da licença' "$stDep (antes: $stAntes) - $($dep.Name) - chave final $($dep.PartialProductKey)" $(if ($dep.LicenseStatus -eq 1) { 'OK' } else { 'Atenção' })
-    Add-Acao $R 'Ativação do Windows' $(if ($masc) { "Chave $masc" } else { 'Nova tentativa de ativação' }) "$stAntes (chave final $($antes.PartialProductKey))" $stDep $(if ($masc -and $antes.PartialProductKey) { "# Para voltar à chave anterior, reinstale a chave terminada em $($antes.PartialProductKey) com: slmgr /ipk <chave>" } else { '' })
-    $R
-}
 
 # ---------------------------------------------------------------------
 # Execução de um lote de ações (sem interface)
@@ -3099,7 +3094,7 @@ function Show-DialogoLista([string]$Titulo, [string]$Texto, $Itens, [string]$Tex
 }
 
 function Set-BotoesAcao([bool]$ativo) {
-    foreach ($c in @($btnIniciar, $btnOtimizar, $btnAtivar, $clb, $grp, $txtCliente, $txtOS, $txtTecnico, $btnTimbrado)) { $c.Enabled = $ativo }
+    foreach ($c in @($btnIniciar, $btnOtimizar, $clb, $grp, $txtCliente, $txtOS, $txtTecnico, $btnTimbrado)) { $c.Enabled = $ativo }
     $btnCorrigir.Enabled = $ativo -and ($Global:Resultados.Count -gt 0)
     $btnRel.Enabled = $ativo -and ($Global:Resultados.Count -gt 0)
 }
@@ -3108,15 +3103,25 @@ function Set-BotoesAcao([bool]$ativo) {
 function Invoke-Lote([string]$Titulo, $Codigo, [int]$Timeout, $Selecao) {
     $Global:Rodando = $true; $Global:Cancelar = $false; $Global:Sync['Cancelar'] = $false
     Set-BotoesAcao $false
-    $prog.Style = 'Marquee'
+    $nEtapas = [math]::Max(1, @($Selecao).Count)
+    $Global:Sync['Prog'] = 0; $Global:Sync['ProgMax'] = $nEtapas
+    $voltarPg3 = ($Global:Resultados.Count -gt 0)
+    $prog.Style = 'Blocks'; $prog.Minimum = 0; $prog.Maximum = $nEtapas; $prog.Value = 0
+    if ($lblPct) { $lblPct.Text = '0%' }
+    Show-Pagina 2
     $Global:StatusBase = "Executando: $Titulo"
     $lblStatus.Text = $Global:StatusBase
+    [System.Windows.Forms.Application]::DoEvents()
     try { $res = Invoke-LoteCore $Titulo $Codigo $Timeout $Selecao }
     finally {
-        $Global:StatusBase = $null; $prog.Style = 'Blocks'
+        $Global:StatusBase = $null
+        $Global:Sync['ProgMax'] = 0; $Global:Sync['Prog'] = 0
+        try { $prog.Value = $prog.Maximum } catch {}
+        if ($lblPct) { $lblPct.Text = '100%' }
         $Global:Rodando = $false
         Set-BotoesAcao $true
     }
+    if ($voltarPg3) { Show-Pagina 3 }
     Show-Itens $res.Itens "Resultado: $Titulo"
     $lblStatus.Text = "$Titulo - concluído."
     if ($Global:FecharApos) { $form.Close() }
@@ -3145,45 +3150,6 @@ function Invoke-Corrigir {
     $f = @($res.Itens | Where-Object { $_.Status -ne 'OK' }).Count
     $r = [System.Windows.Forms.MessageBox]::Show($form, "Reparos concluídos$(if ($f) { " ($f item(ns) com aviso - veja a lista)" }).`r`n`r`nRecomendado: reiniciar o computador e executar a auditoria novamente para comparar as notas.`r`n`r`nDeseja executar a auditoria novamente agora (sem reiniciar)?", 'AuditorTI', 'YesNo', 'Information')
     if ($r -eq 'Yes') { $Global:ManterAcoes = $true; $btnIniciar.PerformClick() }
-}
-
-function Show-Ativacao {
-    $stMap = @{ 0 = 'Não licenciado'; 1 = 'Ativado'; 2 = 'Período de carência'; 3 = 'Carência adicional'; 4 = 'Não original'; 5 = 'Notificação'; 6 = 'Carência estendida' }
-    $lic = Get-CimInstance SoftwareLicensingProduct -Filter "ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL" | Select-Object -First 1
-    $svc = Get-CimInstance SoftwareLicensingService
-    $oem = [string]$svc.OA3xOriginalProductKey
-    $dlg = New-Object Windows.Forms.Form
-    $dlg.Text = 'Ativação do Windows (licença legítima)'; $dlg.Size = New-Object Drawing.Size(620, 360)
-    $dlg.StartPosition = 'CenterParent'; $dlg.FormBorderStyle = 'FixedDialog'; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false; $dlg.Font = New-Object Drawing.Font('Segoe UI', 9)
-    $st = if ($lic) { $stMap[[int]$lic.LicenseStatus] } else { 'Desconhecido' }
-    $info = "Edição: $($lic.Name)`r`nSituação: $st`r`nChave instalada (final): $($lic.PartialProductKey)`r`n`r`n" +
-        $(if ($oem) { "Chave OEM gravada na placa-mãe: XXXXX-XXXXX-XXXXX-XXXXX-$($oem.Substring($oem.Length - 5))`r`n($($svc.OA3xOriginalProductKeyDescription))" } else { 'Nenhuma chave OEM gravada na placa-mãe.' }) +
-        "`r`n`r`nO AuditorTI só ativa com licença válida: a chave original do equipamento ou uma chave comprada. Não é feita nenhuma ativação ilegal."
-    $lb = New-Object Windows.Forms.Label; $lb.Text = $info; $lb.Location = New-Object Drawing.Point(14, 12); $lb.Size = New-Object Drawing.Size(580, 200)
-    $b1 = New-Object Windows.Forms.Button; $b1.Text = 'Ativar com a chave da placa'; $b1.Size = New-Object Drawing.Size(190, 34); $b1.Location = New-Object Drawing.Point(14, 222); $b1.Enabled = [bool]$oem
-    $b2 = New-Object Windows.Forms.Button; $b2.Text = 'Informar chave de produto...'; $b2.Size = New-Object Drawing.Size(190, 34); $b2.Location = New-Object Drawing.Point(210, 222)
-    $b3 = New-Object Windows.Forms.Button; $b3.Text = 'Tentar ativar novamente'; $b3.Size = New-Object Drawing.Size(180, 34); $b3.Location = New-Object Drawing.Point(406, 222)
-    $b4 = New-Object Windows.Forms.Button; $b4.Text = 'Fechar'; $b4.Size = New-Object Drawing.Size(110, 32); $b4.Location = New-Object Drawing.Point(476, 272); $b4.DialogResult = 'Cancel'
-    $b1.Add_Click({ $dlg.Tag = 'oem'; $dlg.DialogResult = 'OK' })
-    $b2.Add_Click({ $dlg.Tag = 'chave'; $dlg.DialogResult = 'OK' })
-    $b3.Add_Click({ $dlg.Tag = 'ato'; $dlg.DialogResult = 'OK' })
-    $dlg.Controls.AddRange(@($lb, $b1, $b2, $b3, $b4)); $dlg.CancelButton = $b4
-    if ($dlg.ShowDialog($form) -ne 'OK') { return }
-    $chave = ''
-    switch ($dlg.Tag) {
-        'oem' { $chave = $oem }
-        'chave' {
-            Add-Type -AssemblyName Microsoft.VisualBasic
-            $chave = ([Microsoft.VisualBasic.Interaction]::InputBox('Digite a chave de produto do Windows (25 caracteres):', 'Chave de produto', '')).Trim().ToUpper()
-            if (-not $chave) { return }
-            if ($chave -notmatch '^[A-Z0-9]{5}(-[A-Z0-9]{5}){4}$') { [System.Windows.Forms.MessageBox]::Show($form, 'Chave inválida. Use o formato XXXXX-XXXXX-XXXXX-XXXXX-XXXXX.', 'Ativação', 'OK', 'Warning') | Out-Null; return }
-        }
-    }
-    $Global:Cfg.Chave = $chave
-    $res = Invoke-Lote 'Ativação do Windows' $Global:CodigoAtivar 600 @()
-    $Global:Cfg.Chave = $null
-    $sit = ($res.Itens | Where-Object { $_.Item -eq 'Situação da licença' } | Select-Object -First 1).Valor
-    [System.Windows.Forms.MessageBox]::Show($form, "Resultado: $sit`r`n`r`nSe falhar, verifique a internet e se a chave corresponde à edição instalada (Home/Pro).", 'Ativação do Windows', 'OK', 'Information') | Out-Null
 }
 
 # ---------------------------------------------------------------------
@@ -3320,8 +3286,8 @@ $btnCorrigir = New-Object Windows.Forms.Button; $btnCorrigir.Text = 'Solucionar 
 $btnCorrigir.BackColor = [Drawing.Color]::FromArgb(230, 81, 0); $btnCorrigir.ForeColor = 'White'; $btnCorrigir.FlatStyle = 'Flat'; $btnCorrigir.Font = New-Object Drawing.Font('Segoe UI', 9.5, [Drawing.FontStyle]::Bold)
 $btnOtimizar = New-Object Windows.Forms.Button; $btnOtimizar.Text = 'Otimizar Windows (Standard)'; $btnOtimizar.Size = New-Object Drawing.Size(210, 36)
 $btnOtimizar.BackColor = [Drawing.Color]::FromArgb(18, 52, 86); $btnOtimizar.ForeColor = 'White'; $btnOtimizar.FlatStyle = 'Flat'; $btnOtimizar.Font = New-Object Drawing.Font('Segoe UI', 9.5, [Drawing.FontStyle]::Bold)
-$btnAtivar = New-Object Windows.Forms.Button; $btnAtivar.Text = 'Ativação do Windows'; $btnAtivar.Size = New-Object Drawing.Size(170, 36); $btnAtivar.FlatStyle = 'Flat'
-$pAcoes.Controls.AddRange(@($btnCorrigir, $btnOtimizar, $btnAtivar))
+$btnParecer = New-Object Windows.Forms.Button; $btnParecer.Text = 'Parecer técnico (PDF)'; $btnParecer.Size = New-Object Drawing.Size(200, 36); $btnParecer.FlatStyle = 'Flat'
+$pAcoes.Controls.AddRange(@($btnCorrigir, $btnOtimizar))
 $pDir.Controls.Add($tabs); $pDir.Controls.Add($esp1); $pDir.Controls.Add($prog); $pDir.Controls.Add($lblStatus); $pDir.Controls.Add($pAcoes); $pDir.Controls.Add($txtLog)
 $tabs.BringToFront()
 
@@ -3368,10 +3334,11 @@ $Global:LaudoSum = $pg3top
 $pg3bot = New-Object Windows.Forms.Panel; $pg3bot.Dock = 'Bottom'; $pg3bot.Height = 92; $pg3bot.BackColor = [Drawing.Color]::FromArgb(244, 247, 250)
 $pAcoes.Dock = 'Top'; $pAcoes.Height = 44
 $pg3botInner = New-Object Windows.Forms.Panel; $pg3botInner.Dock = 'Fill'
-$btnRel.Size = New-Object Drawing.Size(220, 36); $btnRel.Location = New-Object Drawing.Point(8, 6); $btnRel.Text = 'Gerar laudo (PDF)'; $btnRel.BackColor = [Drawing.Color]::FromArgb(30, 142, 62); $btnRel.ForeColor = 'White'; $btnRel.FlatStyle = 'Flat'; $btnRel.Font = New-Object Drawing.Font('Segoe UI', 10, [Drawing.FontStyle]::Bold); $btnRel.Enabled = $true
-$btnPasta.Size = New-Object Drawing.Size(150, 36); $btnPasta.Location = New-Object Drawing.Point(236, 6); $btnPasta.Text = 'Abrir pasta'
-$btnNovo = New-Object Windows.Forms.Button; $btnNovo.Text = 'Novo atendimento'; $btnNovo.Size = New-Object Drawing.Size(170, 36); $btnNovo.Location = New-Object Drawing.Point(396, 6); $btnNovo.FlatStyle = 'Flat'
-$pg3botInner.Controls.AddRange(@($btnRel, $btnPasta, $btnNovo))
+$btnRel.Size = New-Object Drawing.Size(200, 36); $btnRel.Location = New-Object Drawing.Point(8, 6); $btnRel.Text = 'Gerar laudo (PDF)'; $btnRel.BackColor = [Drawing.Color]::FromArgb(30, 142, 62); $btnRel.ForeColor = 'White'; $btnRel.FlatStyle = 'Flat'; $btnRel.Font = New-Object Drawing.Font('Segoe UI', 10, [Drawing.FontStyle]::Bold); $btnRel.Enabled = $true
+$btnParecer.Location = New-Object Drawing.Point(216, 6); $btnParecer.Font = New-Object Drawing.Font('Segoe UI', 10, [Drawing.FontStyle]::Bold)
+$btnPasta.Size = New-Object Drawing.Size(140, 36); $btnPasta.Location = New-Object Drawing.Point(424, 6); $btnPasta.Text = 'Abrir pasta'
+$btnNovo = New-Object Windows.Forms.Button; $btnNovo.Text = 'Novo atendimento'; $btnNovo.Size = New-Object Drawing.Size(170, 36); $btnNovo.Location = New-Object Drawing.Point(572, 6); $btnNovo.FlatStyle = 'Flat'
+$pg3botInner.Controls.AddRange(@($btnRel, $btnParecer, $btnPasta, $btnNovo))
 $pg3bot.Controls.Add($pg3botInner); $pg3bot.Controls.Add($pAcoes)
 $tabs.Dock = 'Fill'
 try { [void]$tabs.TabPages.Remove($tabResumo) } catch {}
@@ -3403,7 +3370,7 @@ Style-Btn $btnIniciar $Global:CorAcc 'White' ([Drawing.Color]::FromArgb(36, 160,
 Style-Btn $btnRel $Global:CorAcc 'White' ([Drawing.Color]::FromArgb(36, 160, 72))
 Style-Btn $btnCorrigir ([Drawing.Color]::FromArgb(230, 81, 0)) 'White' ([Drawing.Color]::FromArgb(245, 124, 0))
 Style-Btn $btnOtimizar $Global:CorPrim 'White' ([Drawing.Color]::FromArgb(28, 74, 122))
-Style-Btn $btnAtivar ([Drawing.Color]::FromArgb(84, 110, 140)) 'White' ([Drawing.Color]::FromArgb(100, 128, 160))
+Style-Btn $btnParecer ([Drawing.Color]::FromArgb(84, 110, 140)) 'White' ([Drawing.Color]::FromArgb(100, 128, 160))
 Style-Btn $btnPasta $cClaro $Global:CorPrim $cClaroH
 Style-Btn $btnNovo $cClaro $Global:CorPrim $cClaroH
 Style-Btn $btnPrecos $cClaro $Global:CorPrim $cClaroH
@@ -3509,31 +3476,57 @@ $lv.Add_SelectedIndexChanged({ if ($lv.SelectedItems.Count -and -not $Global:Rod
 
 $btnCorrigir.Add_Click({ Invoke-Corrigir })
 $btnOtimizar.Add_Click({ Invoke-Otimizar })
-$btnAtivar.Add_Click({ Show-Ativacao })
 
 $btnPasta.Add_Click({ if ($Global:UltimaPasta -and (Test-Path $Global:UltimaPasta)) { Start-Process explorer.exe $Global:UltimaPasta } })
 
+# Gera (ou reaproveita) o laudo e o parecer da auditoria atual.
+# Reaproveita a mesma pasta enquanto os preços/dados não mudarem.
+function Get-Relatorio {
+    $info = @{ Cliente = $txtCliente.Text.Trim(); Tecnico = $txtTecnico.Text.Trim(); OS = $txtOS.Text.Trim(); Reclamacao = $txtReclamacao.Text.Trim(); Timbrado = $Global:Timbrado; MargemTopo = $nudTopo.Value; MargemBase = $nudBase.Value; MargemLado = $nudLado.Value; Precos = (Get-OrcPrecos) }
+    $pstr = ''; if ($info.Precos) { $pstr = (($info.Precos.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ';') }
+    $token = ($Global:Inicio.Ticks.ToString() + '|' + $info.Reclamacao + '|' + $pstr)
+    if (-not $Global:UltimoRel -or $Global:UltimoRel.Token -ne $token) {
+        $rel = New-Relatorio $info
+        $rel.Token = $token
+        $Global:UltimoRel = $rel
+        $Global:UltimaPasta = $rel.Pasta; $btnPasta.Enabled = $true
+        Write-LogUI "Documentos gerados em: $($rel.Pasta)"
+    }
+    return $Global:UltimoRel
+}
+
+# Abre um PDF (ou o HTML, caso o PDF automático não esteja disponível).
+function Open-Documento($btn, [string]$rotulo, [string]$pdf, [string]$html) {
+    if ($pdf) { $lblStatus.Text = "$rotulo gerado com sucesso."; Start-Process $pdf }
+    else {
+        $lblStatus.Text = "$rotulo gerado (PDF automático indisponível)."
+        [System.Windows.Forms.MessageBox]::Show($form, "Não foi possível gerar o PDF automaticamente (Microsoft Edge/Chrome não encontrado).`r`n`r`nO documento será aberto no navegador: use Ctrl+P > 'Salvar como PDF', com Margens = Nenhuma e 'Gráficos de plano de fundo' ativado.", $rotulo, 'OK', 'Information') | Out-Null
+        Start-Process $html
+    }
+}
+
 $btnRel.Add_Click({
     if (-not $Global:Resultados.Count) { return }
-    $btnRel.Enabled = $false; $form.Cursor = 'WaitCursor'
-    $lblStatus.Text = 'Gerando relatório e PDF...'; [System.Windows.Forms.Application]::DoEvents()
+    $btnRel.Enabled = $false; $btnParecer.Enabled = $false; $form.Cursor = 'WaitCursor'
+    $lblStatus.Text = 'Gerando laudo (PDF)...'; [System.Windows.Forms.Application]::DoEvents()
     try {
-        $info = @{ Cliente = $txtCliente.Text.Trim(); Tecnico = $txtTecnico.Text.Trim(); OS = $txtOS.Text.Trim(); Reclamacao = $txtReclamacao.Text.Trim(); Timbrado = $Global:Timbrado; MargemTopo = $nudTopo.Value; MargemBase = $nudBase.Value; MargemLado = $nudLado.Value; Precos = (Get-OrcPrecos) }
-        $rel = New-Relatorio $info
-        $Global:UltimaPasta = $rel.Pasta; $btnPasta.Enabled = $true
-        Write-LogUI "Relatório gerado em: $($rel.Pasta)"
-        if ($rel.Pdf) {
-            $lblStatus.Text = 'Relatório PDF gerado com sucesso.'
-            Start-Process $rel.Pdf
-        }
-        else {
-            $lblStatus.Text = 'Relatório HTML gerado (PDF automático indisponível).'
-            [System.Windows.Forms.MessageBox]::Show($form, "Não foi possível gerar o PDF automaticamente (Microsoft Edge/Chrome não encontrado).`r`n`r`nO relatório será aberto no navegador: use Ctrl+P > 'Salvar como PDF', com Margens = Nenhuma e 'Gráficos de plano de fundo' ativado.", 'Relatório', 'OK', 'Information') | Out-Null
-            Start-Process $rel.Html
-        }
+        $rel = Get-Relatorio
+        Open-Documento $btnRel 'Laudo' $rel.Pdf $rel.Html
     } catch {
-        [System.Windows.Forms.MessageBox]::Show($form, "Erro ao gerar o relatório: $($_.Exception.Message)", 'Relatório', 'OK', 'Error') | Out-Null
-    } finally { $btnRel.Enabled = $true; $form.Cursor = 'Default' }
+        [System.Windows.Forms.MessageBox]::Show($form, "Erro ao gerar o laudo: $($_.Exception.Message)", 'Laudo', 'OK', 'Error') | Out-Null
+    } finally { $btnRel.Enabled = $true; $btnParecer.Enabled = $true; $form.Cursor = 'Default' }
+})
+
+$btnParecer.Add_Click({
+    if (-not $Global:Resultados.Count) { return }
+    $btnRel.Enabled = $false; $btnParecer.Enabled = $false; $form.Cursor = 'WaitCursor'
+    $lblStatus.Text = 'Gerando parecer técnico (PDF)...'; [System.Windows.Forms.Application]::DoEvents()
+    try {
+        $rel = Get-Relatorio
+        Open-Documento $btnParecer 'Parecer técnico' $rel.ParecerPdf $rel.ParecerHtml
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show($form, "Erro ao gerar o parecer técnico: $($_.Exception.Message)", 'Parecer técnico', 'OK', 'Error') | Out-Null
+    } finally { $btnRel.Enabled = $true; $btnParecer.Enabled = $true; $form.Cursor = 'Default' }
 })
 
 $btnIniciar.Add_Click({
